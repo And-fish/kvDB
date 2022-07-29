@@ -191,7 +191,7 @@ func (tb *tableBuilder) tryFinishBlock(entry *utils.Entry) bool {
 	return tb.curBlock.estimateSize > int64(tb.opt.BlockSize)
 }
 
-// 查找key和preKey不同的部分
+// 查找key和baseKey不同的部分
 func (tb *tableBuilder) getDiffKey(newkey []byte) []byte {
 	var i int
 	// 依次对比找到相同的部分
@@ -201,6 +201,7 @@ func (tb *tableBuilder) getDiffKey(newkey []byte) []byte {
 			break
 		}
 	}
+	// 返回diffKey
 	return newkey[i:]
 }
 
@@ -212,26 +213,33 @@ func (tb *tableBuilder) add(entry *utils.Entry, isStable bool) {
 		Value: entry.Value,
 		TTL:   entry.TTL,
 	}
+	// 检查当前block是否写满了
 	if tb.tryFinishBlock(entry) {
 		if isStable {
 			tb.staleDataSize += len(key) + 4
 		}
+		// 如果写满了就将前一个block封装
 		tb.finishBlock()
+		// 创建一个新的block作为curblock
 		tb.curBlock = &block{
 			data: make([]byte, tb.opt.BlockSize),
 		}
 	}
-
+	// 向tableBuilder记录keyHash的[]uint32中添加enrt的key
 	tb.keyHashes = append(tb.keyHashes, utils.Hash(utils.ParseKey(key)))
+	// 更新最新版本号
 	if version := utils.ParseTimeStamp(key); version > tb.maxVersion {
 		tb.maxVersion = version
 	}
 
+	// 获取diffKey
 	var diffKey []byte
+	// 如果当前没有baseKey，那么说明当前entry是curBlock的第一个entry，将这个entry的key作为baseKey
 	if len(tb.curBlock.baseKey) == 0 {
 		tb.curBlock.baseKey = append(tb.curBlock.baseKey[:0], key...)
 		diffKey = key
 	} else {
+		// 否则就去get一下
 		diffKey = tb.getDiffKey(key)
 	}
 
@@ -244,8 +252,10 @@ func (tb *tableBuilder) add(entry *utils.Entry, isStable bool) {
 		diff:    uint16(len(diffKey)),
 	}
 
+	// 在curBlock中记录entryOffset
 	tb.curBlock.entryOffsets = append(tb.curBlock.entryOffsets, uint32(tb.curBlock.end))
 
+	// 向curBlock的Data部分添加header和diffkey
 	tb.append(h.encode())
 	tb.append(diffKey)
 
@@ -253,6 +263,13 @@ func (tb *tableBuilder) add(entry *utils.Entry, isStable bool) {
 	valueBuf := tb.allocate(int(value.ValEncodedSize()))
 	// 将value编码到valueBuf上
 	value.ValEncoding(valueBuf)
+
+	/*
+		entry：外 ---> 内
+		+-----------------------------------------------+
+		| value | ttl | meta | diffkey | diff | overlap |
+		+-----------------------------------------------+
+	*/
 }
 
 // 为单个的block创建索引，转化为BlockOffset
@@ -289,15 +306,18 @@ func (tb *tableBuilder) buildIndex(filter []byte) ([]byte, uint32) {
 
 	var dataSize uint32
 	for i := range tb.blockList {
+		// 将tableBuilder中所有block的数据data统计一下size
 		dataSize += uint32(tb.blockList[i].end)
 	}
 	data, err := tableIndex.Marshal()
 	utils.Err(err)
+	// 返回tableIndex序列化后的[]byte 和 所有block的size
 	return data, dataSize
 }
 
 // 将tableBuilder转化为buildData供后续使用
 func (tb *tableBuilder) done() buildData {
+	// 结束向block写入数据，所有blcok.data此时都封装成功了EntryIndex
 	tb.finishBlock()
 	if len(tb.blockList) == 0 {
 		return buildData{}
@@ -309,30 +329,33 @@ func (tb *tableBuilder) done() buildData {
 	// 创建bllomFilter
 	var filter utils.Filter
 	if tb.opt.BloomFalsePositive > 0 {
-		// 根据optine的假阳率和key的个数计算bitsperkey
+		// 根据optine的假阳率和key的个数计算bitsperkey，并创建合适的bloomFilter
 		bitsperkey := utils.BitsPerkey(len(tb.keyHashes), tb.opt.BloomFalsePositive)
 		filter = utils.NewFilter(tb.keyHashes, bitsperkey)
 	}
 
-	index, dataSize := tb.buildIndex(filter)
-	checksum := tb.calculateChecksum(index)
-	buildData.index = index
+	// 获取blockIndex和所有block.data的大小
+	blockindex, dataSize := tb.buildIndex(filter)
+	// 根据索引计算checksum
+	checksum := tb.calculateChecksum(blockindex)
+	buildData.index = blockindex
 	buildData.checksum = checksum
-	buildData.size = int(dataSize) + len(index) + 4 + 4
+	// 总大小为blockData + BlcokIndex + checksum_len + blockindex_len
+	buildData.size = int(dataSize) + len(blockindex) + 4 + 4
 	return buildData
 }
 
 // 将buildData写入到buf中
-/*
-	外 --> 内
-	+-------------------------------------------------------------------+
-	| ckecksum_len | checksum | BlockIndex_len | BlockIndex | BlockData |
-	+-------------------------------------------------------------------+
-*/
 func (bd *buildData) Copy(buf []byte) (written int) {
 	for _, block := range bd.blockList {
 		written += copy(buf[written:], block.data[:block.end])
 	}
+	/*
+		外 --> 内
+		+-------------------------------------------------------------------+
+		| ckecksum_len | checksum | BlockIndex_len | BlockIndex | BlockData |
+		+-------------------------------------------------------------------+
+	*/
 	written += copy(buf[written:], bd.index)
 	written += copy(buf[written:], utils.Uint32ToBytes(uint32(len(bd.index))))
 	written += copy(buf[written:], bd.checksum)
@@ -340,7 +363,7 @@ func (bd *buildData) Copy(buf []byte) (written int) {
 	return written
 }
 
-// 将tableBuilder转化为buf []byte
+// 将tableBuilder转化为buf []byte，事先总体的封装
 func (tb *tableBuilder) finish() []byte {
 	blockData := tb.done()
 	buf := make([]byte, blockData.size)
@@ -348,3 +371,14 @@ func (tb *tableBuilder) finish() []byte {
 	utils.CondPanic(len(buf) == written, nil)
 	return buf
 }
+
+/*
+	SSTable整体的结构：外 ---> 内
+	+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+	| checksum_len | checksum | blockIndex_len | blockIndex_len |                                                      BlcokData1                                       |
+	|                                                           | checksum_len | checksum | entryIndex_len | entruIndex |			       entry(k-v)1                  |
+	|																													| value | ttl | meta | diffKey | diff | overlap |
+	+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+*/
+
+// flush
