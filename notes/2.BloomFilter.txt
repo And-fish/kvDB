@@ -1,0 +1,238 @@
+一、布隆过滤器
+    · Bloom Filter实际上由一个大型的位图和一一系列哈希函数组成的，用于快速检索一个元素是否在一个集合中；
+      位图的每个元素都只占1bit，并且每个元素都只能为0或1；
+      bloom filter拥有k个哈希函数，当一个元素要加入布隆过滤器，会使用k个哈希函数对其进行k次计算，得到k个哈希值，
+      并且根据得到的哈希值，在位图中把对应的下标置为1；
+
+    · 判断某个数是否在布隆过滤器中，就对该元素进行k次哈希计算，得到的值在位图中判断每个元素是否全为1，
+      如果只要有一位不为0，就说明这个值不在布隆过滤器中，直接返回false；
+      但是在特殊情况下，可能会对"存在"出现误判，所以即使全部位都是1，也不能直接返回true，需要进行进一步的判断；
+
+    · 为什么要使用布隆过滤器？
+        KV存储的业务逻辑中，会频繁的用key作为索引去查询对应的value；
+        而当内存中的空间占用过大，就会将内存的SkipList持久化到磁盘中，会生成n个SST文件，
+        每个SST文件当中的Key都是子有一定范围的、有序的；当需要查找一个key的时候，会在对应范围的SST文件中进行查找；
+        设想一下，如果要查找一个不存在的key，就需要在每一层的SST文件中都需要确定这个key是否存在；
+        那么就可以引用布隆过滤器来快速的拒绝掉大部分的无效key的查找请求
+
+
+二、简单的布隆过滤器
+    · 首先需要一个hash函数将[]byte的key转化为uint32的数
+        func hashfun(key []byte) uint32 {
+          	res := uint32(0)
+          	for i := 0; i < len(key); i++ {
+          	  res += uint32(key[i])
+          	}
+          	return res
+        }
+    
+	· 计算hashval在bitmap中的offset
+		func getOffset(hashval, size uint32) (uint32, uint32) {
+			// 一个byte有8位，所以一个size==100的[]byte可以存储800个信息
+			truesize := size * 8
+			// 将hashval对真正的size取模，保证能在位图中表示
+			offset := hashval % truesize
+			// byteOffset是在[]byte的offset
+			byteOffset := offset / 8
+			// bitOffset是在[]byte[byteoffset]的位置
+			bitOffset := offset % 8
+			return byteOffset, bitOffset
+		}
+
+    · 再创建一个位图，并将为位图对应的offset置为1
+        func main() {
+          	bitmap := make([]byte, 100)
+			// 求hashval
+          	hashval := hashfun([]byte("key"))
+			// 求在bitmap的offset
+		  	byteOffset, bitOffset := getOffset(hashval, uint32(len(bitmap)))
+			// 在bitmap[byteOffset]的bitOffset上置为1，
+			// 例如 bitmap[byteOffset] == 5 == 00000101，bitOffset(0~7)==6，表示要在index == 6上置为1
+			// 将1 << 6 == 01000000，|=00000101 ==01000101
+		  	bitmap[byteOffset] |= 1 << bitOffset
+        }
+    
+    · 再编写判断函数
+        func search(key, bitmap []byte) bool {
+          	hashval := hashfun([]byte(key))
+			// 求出key在bitmap中的offset
+          	byteOffset, bitOffset := getOffset(hashval, uint32(len(bitmap)))
+			// 将bitmap[byteOffset]右移bitOffset，如果为1，说明这个hashval的offset之前被插入过
+		  	return bitmap[byteOffset]>>byte(bitOffset) == 1
+        }
+		// true
+        fmt.Printf("search([]byte(\"key\"), bitmap): %v\n", search([]byte("key"), bitmap))
+	    // false
+		fmt.Printf("search([]byte(\"val\"), bitmap): %v\n", search([]byte("val"), bitmap))
+	
+	· 可以发现这个简单的布隆过滤器就可以正常工作了；
+	  但是问题在于它的效果很差，因为这个filter只有一个hash函数，很容易发生冲突，也就是误判；
+		1. Hash函数过于简单，也就说对于这个hash函数来说，只是单纯的把字节编码累加，例如 "key"和"kdz"的hashval就是一样的；
+			hashval := hashfun([]byte("kdz"))
+			byteOffset, bitOffset := getOffset(hashval, uint32(len(bitmap)))
+			bitmap[byteOffset] |= 1 << bitOffset
+			// return true
+			fmt.Printf("search([]byte(\"key\"), bitmap): %v\n", search([]byte("key"), bitmap))
+			
+		2. Hash函数过少，即使一个hash函数的逻辑再精妙，那么对于固定size的bitmap来说也是很容易冲突的；
+		   因为bitmap固定，所以很有可能两个不同的hashval对size取模后得到的offset可能一样；
+
+	
+	· 也就是说对同一个key计算多次hashval，再对所有的hashval都计算offset，将多个bit置为1；
+	  在判断的时候search多个index是否全为1，理论上就可以减少冲突的概率，结果也会变得准确；
+
+	· 但是可能会出现一个问题，就是当Hash函数过多，一个key需要标记的index位置就会变多，那么很容易就将所有的bit位全都标记为1了；
+	  那么误判率就会急剧上升；
+	  同理在hash函数数量固定的情况下，bitmap的size越大，数据量也会越稀疏；
+
+
+	  
+三、误判率
+	· 误判率就是把一个不存在的值报告为存在(但是存在的值一定会返回true)；
+	  也就是说一个不存在的key的所有hashval都被标记为1的概率；
+	  因为hash函数可以理解为均匀的分布；
+	  那么知道bit位被标记为1的比例，就可以算出K次hashval都标记为1的概率；
+
+	· 假设hash函数以等概率的选择并设置bitmap中的某一位，size是bitmap的大小，k是函数的个数；
+	  那么bitmap中某一个特定为在元素插入时的一次hash操作中没有置为1的概率是：
+		1-(1/size)  	只有1/size的概率为1
+
+	· 那么k次hash都没置为1的概率为：
+		1-(1/size)^k 	k次1/size的概率
+
+	· 如果插入了n个元素，这个特定的位仍然不为1的概率为：
+		1-(1/size)^(k*n)	n次1-(1/size)^k的概率
+
+	· 所以这个位置为1的概率为：
+		1-(1-(1/size)^(k*n))	减去反例
+
+	· 现在search一个元素是否在集合中，所需的k个位置都按照上述方法设置为1，
+	  但是该方法可能会使算法错误的认为某个本来不在集合的元素被检测为在集合中，所以概率为：
+	  	(1-(1-(1/size)^(k*n)))^k ≈ (1-(e^(-kn/size)))^k
+	  也就是说，不同元素一个位置相同且为1的概率是1-(1-(1/size)^(k*n))，k个位置都相同的可能性为(1-(1-(1/size)^(k*n)))^k；
+
+	· 所以随着size的增大，误判率会降低，
+	  同时n越多，误判率会增大；
+
+	· 所以对于给定的size和n，最优解K == (size/n)*ln(2) ≈≈ (size/n)*0.7
+	  对于给定的误判率P，最优解size == -(n*ln(P))/((ln(2))^2)
+
+	· 代码表示为：
+		// 根据给定的误判率P计算最优解的size
+		func bloomBitsPerKey(numEntries int, fp float64) int {
+			size := -1 * float64(numEntries) * math.Log(fp) / math.Pow(float64(0.69314718056), 2)
+			// 在对于确定的size和n得到hash函数个数K的预处理数据
+			locs := math.Ceil(size / float64(numEntries))
+			return int(locs)
+		}
+
+		// 创建BloomFilter
+		func initFilter(numEntries int, bitsPerKey int) *BloomFilter {
+			bf := &BloomFilter{}
+			// bits不可能小于0
+			if bitsPerKey < 0 {
+				bitsPerKey = 0
+			}
+			// ln(2)近似值为0.69
+			k := uint32(float64(bitsPerKey) * 0.69)
+			// 至少有1个hash函数
+			if k < 1 {
+				k = 1
+			}
+			// 最大值为30
+			if k > 30 {
+				k = 30
+			}
+			bf.k = uint8(k)
+			// 需要的size大小
+			nBits := numEntries * int(bitsPerKey)
+			// 设定一个最小的bloom filter长度
+			if nBits < 64 {
+				nBits = 64
+			}
+			// 开辟大小足够的filter
+			nBytes := (nBits + 7) / 8
+			nBits = nBytes * 8
+			filter := make([]byte, nBytes+1)
+		
+			// 最后一个byte用于存放hash函数的个数
+			filter[nBytes] = uint8(k)
+			
+			bf.bitmap = filter
+			return bf
+		}
+
+
+四、实际应用
+	· insert：
+		func (f *BloomFilter) InsertKey(k []byte) bool {
+			// 使用Hash函数得到uint32的hashval
+			return f.Insert(Hash(k))
+		}
+		// 实际插入的过程
+		func (f *BloomFilter) Insert(h uint32) bool {
+			k := f.k
+			if k > 30 {
+				// 暂未实现的应用
+				return true
+			}
+			// bitmap的长度
+			nBits := uint32(8 * (f.Len() - 1))
+			// 采用类似于Murmur的hash算法
+			delta := h>>17 | h<<15
+			// 循环标记k次
+			for j := uint8(0); j < k; j++ {
+				bitPos := h % uint32(nBits)
+				// 在正确的offset上置为1
+				f.bitmap[bitPos/8] |= 1 << (bitPos % 8)
+				h += delta
+			}
+			return true
+		}
+
+	· 查找：
+		func (f *BloomFilter) MayContainKey(k []byte) bool {
+			// 使用Hash函数得到uint32的hashval
+			return f.MayContain(Hash(k))
+		}
+		// 对于在集合中的key一定会返回true，对于不存在的key大概率返回false
+		func (f *BloomFilter) MayContain(h uint32) bool {
+			if f.Len() < 2 {
+				return false
+			}
+			k := f.k
+			if k > 30 {
+				// 未完成的应用
+				return true
+			}
+			// 真正的bitmap size
+			nBits := uint32(8 * (f.Len() - 1))
+			delta := h>>17 | h<<15
+			// 循环查看k次
+			for j := uint8(0); j < k; j++ {
+				bitPos := h % nBits
+				// 如果其中有一次检查为0，说明错误
+				if f.bitmap[bitPos/8]&(1<<(bitPos%8)) == 0 {
+					return false
+				}
+				h += delta
+			}
+			return true
+		}
+
+
+五、概念补充
+	· bloomfilter对缓存穿透上的解决思路
+		
+	· 概念：
+		缓存穿透是指查询一个数据库中不一定存在的数据；正常流程是依据key区查询value，数据查询请求会先发送到缓存中，
+		如果key不存在或者key已经过期，在对主数据库进行进行查询，将查询到的对象放到缓存中，如果查询对象不存在，则不放入缓存中；
+
+		如果出现大量的请求一个主数据库中不存在的数据，每一次请求都不会命中缓存，然后请求会被发送到主数据库，这样就会导致主数据库的压力变大；
+
+	· 解决方法：
+		1. 缓存空值：当请求在主数据库中查询到没有这条数据时候，在缓存中也会记录这个数据，但是value为空；
+		             后续请求这个数据时就可以命中缓存直接返回空；
+					 缺点在于：空值的过期时间不好确定，空值时间过长会浪费缓存空间，时间过短就失去了效果；
+
+		2. bllomfilter：bloomfilter中会记录存在于主数据库中的数据，请求会先发送给bloomfilter，如果bloomfilter判断没有数据，直接返回flase；
