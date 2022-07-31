@@ -5,4 +5,7 @@ type levelManager struct {
 	maxFID uint64
 	opt    *Options
 	cache  *cache
+	// manifestFile *file.ManifestFile
+	lsm           *LSM
+	compactStatus *compactStatus
 }

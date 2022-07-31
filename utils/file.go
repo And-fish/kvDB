@@ -5,6 +5,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/pkg/errors"
 )
 
 // 根据fileName获取到FID
@@ -28,4 +30,14 @@ func FID(fileName string) uint64 {
 // 计算checksum
 func CalculateChecksum(data []byte) uint64 {
 	return uint64(crc32.Checksum(data, CastagnoliCrcTable))
+}
+
+// 校验checksum
+func VerifyChecksum(data []byte, expected []byte) error {
+	trueChecksum := uint64(crc32.Checksum(data, CastagnoliCrcTable))
+	expectedU64 := Bytes2Uint64(expected)
+	if trueChecksum != expectedU64 {
+		return errors.Wrapf(ErrChecksumMismatch, "actual: %d, expected: %d", trueChecksum, expectedU64)
+	}
+	return nil
 }

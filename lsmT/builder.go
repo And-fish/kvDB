@@ -89,7 +89,7 @@ func (tb *tableBuilder) isEmpty() bool {
 	return len(tb.keyHashes) == 0
 }
 
-// 计算checksum，将check转化为[]byte
+// 计算checksum，将checksum转化为[]byte
 func (tb *tableBuilder) calculateChecksum(data []byte) []byte {
 	checksum := utils.CalculateChecksum(data)
 	return utils.Uint64ToBytes(checksum)
@@ -381,4 +381,23 @@ func (tb *tableBuilder) finish() []byte {
 	+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 */
 
-// flush
+// 将tableBuilder flush到磁盘中
+func (tb *tableBuilder) flush(lm *levelManager, tableName string) (*table, error) {
+	builddata := tb.done()
+	table := &table{
+		lm:  lm,
+		fid: utils.FID(tableName),
+	}
+	buf := make([]byte, builddata.size)
+	// 将buildData写入到buf中，返回长度
+	written := builddata.Copy(buf)
+	utils.CondPanic((written != len(buf)), fmt.Errorf("tableBuilder.flush written != len(buf)"))
+	// 从sst.MmapFile.data读取一个足够大的空间
+	sstBuf, err := table.sst.Btyes(0, builddata.size)
+	if err != nil {
+		return nil, err
+	}
+	// 将BuildData写入到MmapFile中
+	copy(sstBuf, buf)
+	return table, nil
+}
