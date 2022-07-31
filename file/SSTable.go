@@ -181,6 +181,7 @@ func (sst *SSTable) HasBloomFilter() bool {
 
 // 返回sstable.file.data从offset开始size的[]byte
 func (sst *SSTable) Btyes(offset, size int) ([]byte, error) {
+	// 从mmapfile.data中读取
 	return sst.file.Bytes(offset, size)
 }
 

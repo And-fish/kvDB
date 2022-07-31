@@ -53,6 +53,10 @@ type buildData struct {
 // header的大小为4
 const headerSize = uint16(unsafe.Sizeof(header{}))
 
+func (b *block) verifyChecksum() error {
+	return utils.VerifyChecksum(b.data, b.checksum)
+}
+
 // 解码header，将[]byte转化为header
 func (h *header) decode(buf []byte) {
 	// 用一个haederSize数组重构h，再将buf的前headerSize赋值到这个数组，
@@ -293,7 +297,7 @@ func (tb *tableBuilder) writeBlockOffsets(tableIndex *pb.TableIndex) []*pb.Block
 	return offsets
 }
 
-// 创建索引
+// 创建TableIndex(BlockIndexs)索引
 func (tb *tableBuilder) buildIndex(filter []byte) ([]byte, uint32) {
 	tableIndex := &pb.TableIndex{}
 	if len(filter) > 0 {

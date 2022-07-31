@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"kvdb/pb"
 	"kvdb/utils"
+	"sort"
 )
 
 type Item struct {
@@ -112,14 +114,222 @@ func (bitr *blockIterator) setIdx(i int) {
 	bitr.item = &Item{entry: entry}
 }
 
-// // 跳转到某个block
-// func (bitr *blockIterator) seek(key []byte) {
-// 	bitr.err = nil
-// 	startIndex := 0
-// 	sort.Search(len(bitr.entryOffset), func(idx int) bool {
-// 		if idx < startIndex {
-// 			return false
-// 		}
-// 		bitr .se
-// 	})
-// }
+// 将blockIterator跳转到某个entry，entry.key 正好>= key
+func (bitr *blockIterator) seek(key []byte) {
+	bitr.err = nil
+	startIndex := 0
+	// 找到一个entry的key正好 >=  key，返回它在entryOffset的index
+	foundEntryIdx := sort.Search(len(bitr.entryOffsets), func(idx int) bool {
+		if idx < startIndex {
+			return false
+		}
+		bitr.setIdx(idx)
+		// 如果bitr.key >= key 返回true
+		return utils.CompareKeys(bitr.key, key) >= 0
+	})
+	bitr.setIdx(foundEntryIdx)
+}
+
+// 将blockIterator跳转到第一个entry
+func (bitr *blockIterator) seekToFirst() {
+	bitr.setIdx(0)
+}
+
+// 将blockIterator跳转到最后一个个entry
+func (bitr *blockIterator) seekToLast() {
+	bitr.setIdx(len(bitr.entryOffsets) - 1)
+}
+
+// 跳转到下一个
+func (bitr *blockIterator) Next() {
+	bitr.setIdx(bitr.idx + 1)
+}
+
+// Error
+func (bitr *blockIterator) GetError() error {
+	return bitr.err
+}
+
+// 判断是否还能继续(有效性)
+func (bitr *blockIterator) Valid() bool {
+	return bitr.err != io.EOF
+}
+
+// 从头开始
+func (bitr *blockIterator) Rewind() bool {
+	bitr.seekToFirst()
+	return true
+}
+
+// 获取当前的Item，可以根据这个获取到Entry
+func (bitr *blockIterator) GetItem() utils.Item {
+	return bitr.item
+}
+
+// 获取err
+func (bitr *blockIterator) Error() error {
+	return bitr.err
+}
+func (bitr *blockIterator) Close() error {
+	return nil
+}
+
+// tableIterator用于抽象跳转到不同的block
+type tableIterator struct {
+	item          utils.Item
+	opt           *utils.Options
+	table         *table
+	blockPos      int
+	blockIterator *blockIterator
+	err           error
+}
+
+// 下一个entry
+func (titr *tableIterator) Next() {
+	titr.err = nil
+
+	/*
+		外 --> 内
+		+-------------------------------------------------------------------+
+		| ckecksum_len | checksum | BlockIndexs_len | BlockIndexs | BlockData |
+		+-------------------------------------------------------------------+
+	*/
+
+	// titr.table.sst.GetIndexs().GetOffsets()是table对应的sstable的[]*blockindex
+	if titr.blockPos >= len(titr.table.sst.GetIndexs().GetOffsets()) {
+		titr.err = io.EOF
+		return
+	}
+	// 如果block.data == nil，说明需要跳到下一个block上
+	if len(titr.blockIterator.data) == 0 {
+		// 获取block
+		block, err := titr.table.block(titr.blockPos)
+		if err != nil {
+			titr.err = nil
+			return
+		}
+		titr.blockIterator.tableID = titr.table.fid
+		titr.blockIterator.blockID = titr.blockPos
+		titr.blockIterator.setBlcok(block)
+		titr.blockIterator.seekToFirst()
+		titr.err = titr.blockIterator.Error()
+		return
+	}
+
+	titr.blockIterator.Next()
+	// 如果无效了，再次为了能够正确迭代，下一次调用Next()会跳转到下一个block
+	if !titr.blockIterator.Valid() {
+		titr.blockPos++
+		titr.blockIterator.data = nil
+		titr.Next()
+		return
+	}
+	titr.item = titr.blockIterator.item
+}
+
+// 判断是否还能继续读
+func (titr *tableIterator) Valid() bool {
+	return titr.err != io.EOF
+}
+
+// 调整到整个sstable的第一个block的第一个entry
+func (titr *tableIterator) seekToFirst() {
+	numBlocks := len(titr.table.sst.GetIndexs().Offsets)
+	if numBlocks == 0 {
+		titr.err = io.EOF
+		return
+	}
+	titr.blockPos = 0
+	block, err := titr.table.block(titr.blockPos)
+	if err != nil {
+		titr.err = err
+		return
+	}
+	titr.blockIterator.tableID = titr.table.fid
+	titr.blockIterator.blockID = titr.blockPos
+	titr.blockIterator.setBlcok(block)
+	titr.blockIterator.seekToFirst()
+	titr.item = titr.blockIterator.GetItem()
+	titr.err = titr.blockIterator.Error()
+}
+
+// 跳转到最后一个block的最后一个entry
+func (titr *tableIterator) seekToLast() {
+	numBlocks := len(titr.table.sst.GetIndexs().Offsets)
+	if numBlocks == 0 {
+		titr.err = io.EOF
+		return
+	}
+	titr.blockPos = numBlocks - 1
+	block, err := titr.table.block(titr.blockPos)
+	if err != nil {
+		titr.err = err
+		return
+	}
+	titr.blockIterator.tableID = titr.table.fid
+	titr.blockIterator.blockID = titr.blockPos
+	titr.blockIterator.setBlcok(block)
+	titr.blockIterator.seekToLast()
+	titr.item = titr.blockIterator.GetItem()
+	titr.err = titr.blockIterator.Error()
+}
+
+// 跳转到指定block的指定key，如果key不存在，会跳转到最接近的entryKey>=key
+func (titr *tableIterator) seekIdx(idx int, key []byte) {
+	titr.blockPos = idx
+	block, err := titr.table.block(idx)
+	if err != nil {
+		titr.err = err
+		return
+	}
+	titr.blockIterator.tableID = titr.table.fid
+	titr.blockIterator.blockID = titr.blockPos
+	titr.blockIterator.setBlcok(block)
+	titr.blockIterator.seek(key)
+	titr.item = titr.blockIterator.GetItem()
+	titr.err = titr.blockIterator.Error()
+}
+
+// 通过二分法搜索offsets
+// 如果idx == 0，说明key只能在第一个block中 block[0].MinKey <= key
+func (titr *tableIterator) Seek(key []byte) {
+	var blockOffset pb.BlockOffset
+
+	/*
+		返回一个baseKey刚刚大于key的block
+		+---------------------------------------------------+
+		|           block1            |       block2        |
+		| basekey1           key      | basekey2			|
+		+---------------------------------------------------+
+		会返回 idx == 2；
+		如果key不存在会返回 ind == len-1；
+	*/
+	idx := sort.Search(len(titr.table.sst.GetIndexs().GetOffsets()), func(idx int) bool {
+		utils.CondPanic(!titr.table.offsets(&blockOffset, idx), fmt.Errorf("tableutils.Seek idx < 0 || idx > len(index.GetOffsets()"))
+		if idx == len(titr.table.sst.GetIndexs().GetOffsets()) {
+			return true
+		}
+		// 找到一个刚刚大于key的block
+		return utils.CompareKeys(blockOffset.GetKey(), key) > 0
+	})
+	if idx == 0 {
+		titr.seekIdx(0, key)
+		return
+	}
+	titr.seekIdx(idx-1, key)
+
+}
+func (titr *tableIterator) Rewind() {
+	if titr.opt.IsAsc {
+		titr.seekToFirst()
+	} else {
+		titr.seekToLast()
+	}
+}
+func (titr *tableIterator) Item() utils.Item {
+	return titr.item
+}
+func (titr *tableIterator) Close() error {
+	titr.blockIterator.Close()
+	return titr.table.DecrRef()
+}

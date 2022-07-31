@@ -3,7 +3,6 @@ package lsmt
 import (
 	"bytes"
 	"kvdb/utils"
-	"sync/atomic"
 )
 
 type memtable struct {
@@ -14,7 +13,7 @@ type memtable struct {
 	maxVersion uint64
 }
 
-// NewMemtable
-func (lsm *LSM) NewMemtable() *memtable {
-	newFid := atomic.AddUint32(lsm.leb)
-}
+// // NewMemtable
+// func (lsm *LSM) NewMemtable() *memtable {
+// 	newFid := atomic.AddUint32(lsm.leb)
+// }

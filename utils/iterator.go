@@ -12,7 +12,7 @@ type Item interface {
 }
 type Options struct {
 	Prefix []byte
-	IsAsc  bool
+	IsAsc  bool // 是否是升序查询
 }
 
 // SkipListIterator
