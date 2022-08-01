@@ -6,6 +6,8 @@ type Iterator interface {
 	Valid() bool
 	Rewind()
 	Item() Item
+	Close() error
+	Seek(key []byte)
 }
 type Item interface {
 	Entry() *Entry
@@ -100,4 +102,9 @@ func (si *SkipListIterator) SeekMore(targetKey []byte) {
 // 找一个最接近targetKey且node.key <= key的node
 func (si *SkipListIterator) SeekLess(targetKey []byte) {
 	si.node, _ = si.skiplist.findNear(targetKey, true, true)
+}
+
+// 找到一个最接近key，且node.key >= key 的node
+func (si *SkipListIterator) Seek(key []byte) {
+	si.node, _ = si.skiplist.findNear(key, false, true)
 }

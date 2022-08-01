@@ -313,6 +313,7 @@ func (tb *tableBuilder) buildIndex(filter []byte) ([]byte, uint32) {
 		// 将tableBuilder中所有block的数据data统计一下size
 		dataSize += uint32(tb.blockList[i].end)
 	}
+	// 将
 	data, err := tableIndex.Marshal()
 	utils.Err(err)
 	// 返回tableIndex序列化后的[]byte 和 所有block的size
@@ -385,7 +386,7 @@ func (tb *tableBuilder) finish() []byte {
 	+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 */
 
-// 将tableBuilder flush到磁盘中
+// 将tableBuilder生成table(将数据放到mmap [] byte中)返回对应的table
 func (tb *tableBuilder) flush(lm *levelManager, tableName string) (*table, error) {
 	builddata := tb.done()
 	table := &table{

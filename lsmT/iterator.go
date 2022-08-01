@@ -179,7 +179,7 @@ type tableIterator struct {
 	item          utils.Item
 	opt           *utils.Options
 	table         *table
-	blockPos      int
+	blockPos      int // 当前是哪一个block
 	blockIterator *blockIterator
 	err           error
 }
@@ -307,11 +307,14 @@ func (titr *tableIterator) Seek(key []byte) {
 	idx := sort.Search(len(titr.table.sst.GetIndexs().GetOffsets()), func(idx int) bool {
 		utils.CondPanic(!titr.table.offsets(&blockOffset, idx), fmt.Errorf("tableutils.Seek idx < 0 || idx > len(index.GetOffsets()"))
 		if idx == len(titr.table.sst.GetIndexs().GetOffsets()) {
+			// 如果越界了返回最后一个
 			return true
 		}
 		// 找到一个刚刚大于key的block
 		return utils.CompareKeys(blockOffset.GetKey(), key) > 0
 	})
+	// 如果返回0，说明blocks[1].minkey  > key，只有可能在第0个
+	// 或者block[0],minkey > key，不存在该key，所以直接在第0个block中找
 	if idx == 0 {
 		titr.seekIdx(0, key)
 		return
