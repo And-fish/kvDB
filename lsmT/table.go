@@ -82,18 +82,18 @@ func openTable(lm *levelManager, tableName string, buider *tableBuilder) *table 
 	var table *table
 	var err error
 	fid := utils.FID(tableName)
-	// 如果传入了builder，说明需要根据builder获取table
+	// 如果传入了builder，说明需要根据将buider flush到磁盘
 	if buider != nil {
 		table, err = buider.flush(lm, tableName)
 		if err != nil {
 			utils.Err(err)
 			return nil
 		}
-	} else { // 说明要创建一个新的table
+	} else { // 否则就尝试加载一个sst文件
 		// 创建table
 		table.lm = lm
 		table.fid = fid
-		// 创建sstable
+		// 初始化MmapFile
 		table.sst = file.OpenSSTable(&file.Options{
 			FileName: tableName,
 			Dir:      lm.opt.WorkDir,
@@ -226,13 +226,12 @@ func (table *table) Search(key []byte, maxVs *uint64) (entry *utils.Entry, err e
 	defer iter.Close()
 
 	iter.Seek(key)
-	if iter.Valid() {
+	if !iter.Valid() {
 		return nil, utils.ErrKeyNotFound
 	}
 
 	if utils.IsSameKey(iter.Item().Entry().Key, key) {
-		version := utils.ParseTimeStamp(iter.Item().Entry().Key)
-		if version > *maxVs {
+		if version := utils.ParseTimeStamp(iter.Item().Entry().Key); version > *maxVs {
 			*maxVs = version
 			return iter.Item().Entry(), nil
 		}
@@ -264,4 +263,9 @@ func (table *table) NewIterator(opt *utils.Options) utils.Iterator {
 		table:         table,
 		blockIterator: &blockIterator{},
 	}
+}
+
+// Stale数据的大小
+func (table *table) StaleDataSize() uint32 {
+	return table.sst.GetIndexs().StaleDataSize
 }

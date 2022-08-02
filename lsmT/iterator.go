@@ -322,6 +322,8 @@ func (titr *tableIterator) Seek(key []byte) {
 	titr.seekIdx(idx-1, key)
 
 }
+
+// 从头开始(在openTable中传入的option.isAsc == false，所以会seek到Last，这样maxkey也就是item.entry.key)
 func (titr *tableIterator) Rewind() {
 	if titr.opt.IsAsc {
 		titr.seekToFirst()

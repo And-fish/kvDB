@@ -5,7 +5,7 @@ import (
 	"kvdb/utils"
 )
 
-type memtable struct {
+type memTable struct {
 	lsm *LSM
 	// wal *file.WalFile
 	sl         *utils.SkipList

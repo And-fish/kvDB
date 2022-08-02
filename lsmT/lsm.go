@@ -39,3 +39,12 @@ func (lsm *LSM) Close() {
 
 	}
 }
+
+func (lsm *LSM) initLevelManager(opt *Options) *levelManager {
+	lm := *&levelManager{lsm: lsm} // 反引用
+	// lm.compactState =lsm.newcom
+	lm.opt = opt
+
+	// 构建manifest
+	// if lm.
+}

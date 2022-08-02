@@ -276,6 +276,17 @@ func (tb *tableBuilder) add(entry *utils.Entry, isStable bool) {
 	*/
 }
 
+// 添加旧的key，和压缩merge有关
+func (tb *tableBuilder) AddStaleKey(e *utils.Entry) {
+	tb.staleDataSize += len(e.Key) + len(e.Value) + 4 + 4
+	tb.add(e, true)
+}
+
+// 添加Key
+func (tb *tableBuilder) Addkey(entry *utils.Entry) {
+	tb.add(entry, false)
+}
+
 // 为单个的block创建索引，转化为BlockOffset
 func (tb *tableBuilder) writeBlockOffset(b *block, startOffset uint32) *pb.BlockOffset {
 	offset := &pb.BlockOffset{}
