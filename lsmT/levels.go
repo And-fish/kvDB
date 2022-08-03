@@ -238,7 +238,22 @@ func (lm *levelManager) build() error {
 	return nil
 }
 
-// 向L0层flush一个SStable
-func (lm *levelManager) flush(immutable *memTable) (err error) {
+// // 向L0层flush一个SStable
+// func (lm *levelManager) flush(immutable *memTable) (err error) {
+// 	// 首先分配一个唯一的FID
+// 	fid:=immutable.
+// }
 
+// 初始化LevelManager
+func (lsm *LSM) initLevelManager(opt *Options) *levelManager {
+	lm := &levelManager{lsm: lsm} // 反引用
+	// TODO  lm.compactState =lsm.newcom
+	lm.opt = opt
+
+	// 构建manifest
+	if err := lm.loadManifest(); err != nil {
+		panic(err)
+	}
+	lm.build()
+	return lm
 }

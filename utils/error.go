@@ -17,7 +17,6 @@ var (
 	gopath = path.Join(os.Getenv("GOPATH"), "src") + "/"
 )
 
-// NotFoundKey 找不到key
 var (
 	// ErrKeyNotFound is returned when key isn't found on a txn.Get.
 	ErrKeyNotFound = errors.New("Key not found")
@@ -58,6 +57,12 @@ func Panic(err error) {
 		panic(err)
 	}
 }
+
+// Panic2 _
+func Panic2(_ interface{}, err error) {
+	Panic(err)
+}
+
 func CondPanic(condition bool, err error) {
 	if condition {
 		Panic(err)
@@ -94,6 +99,14 @@ func location(deep int, fullPath bool) string {
 func Err(err error) error {
 	if err != nil {
 		fmt.Printf("%s %s\n", location(2, true), err)
+	}
+	return err
+}
+
+// WarpErr err
+func WarpErr(format string, err error) error {
+	if err != nil {
+		fmt.Printf("%s %s %s", format, location(2, true), err)
 	}
 	return err
 }

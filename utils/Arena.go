@@ -80,3 +80,8 @@ func (a *Arena) getNodeOffset(node *skiplistNode) uint32 {
 	// 因为buf是连续的数组，所以将node的地址和buf的头节点的地址相见就是node在buf上的offset
 	return uint32(uintptr(unsafe.Pointer(node)) - uintptr(unsafe.Pointer(&a.buf[0])))
 }
+
+// 返回arena的被使用了的大小 (NOT LEN(ARENA.BUF))
+func (a *Arena) szie() int64 {
+	return int64(atomic.LoadUint32(&a.n))
+}

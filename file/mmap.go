@@ -109,7 +109,7 @@ func (m *MmapFile) NewReader(offset int) io.Reader {
 	}
 }
 
-// 从offset开始读取szie个byte
+// 从offset开始读取Data中size个byte
 func (m *MmapFile) Bytes(off, sz int) ([]byte, error) {
 	if len(m.Data[off:]) < sz {
 		return nil, io.EOF

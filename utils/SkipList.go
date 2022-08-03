@@ -360,3 +360,7 @@ func (s *SkipList) findLast() *skiplistNode {
 		level--
 	}
 }
+
+func (sl *SkipList) GetSize() int64 {
+	return sl.arena.szie()
+}
