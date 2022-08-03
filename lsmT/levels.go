@@ -54,17 +54,22 @@ func (lh *levelHandler) close() error {
 	}
 	return nil
 }
+
+// 返回本level的总size
 func (lh *levelHandler) getTotalSize() int64 {
 	lh.RLock()
 	defer lh.RUnlock()
 
 	return lh.totalSize
 }
+
+// 当本层添加了新的table，也会对totalsize增加table大小
 func (lh *levelHandler) addSize(table *table) {
 	lh.totalSize += table.GetSize()
 	lh.totalStaleSize += int64(table.StaleDataSize())
 }
 
+// 返回对应level的table数量
 func (lh *levelHandler) numTables() int {
 	lh.RLock()
 	defer lh.Unlock()
@@ -238,11 +243,32 @@ func (lm *levelManager) build() error {
 	return nil
 }
 
-// // 向L0层flush一个SStable
-// func (lm *levelManager) flush(immutable *memTable) (err error) {
-// 	// 首先分配一个唯一的FID
-// 	fid:=immutable.
-// }
+// 向L0层flush一个SStable
+func (lm *levelManager) flush(immutable *memTable) (err error) {
+	// 首先分配一个唯一的FID
+	fid := immutable.wal.GetFid()
+	sstName := utils.FileNameSSTable(lm.opt.WorkDir, fid)
+
+	// 构建builder
+	builder := newTableBuilder(lm.opt)
+	iter := immutable.sl.NewSkiplistIterator()
+	for iter.Rewind(); iter.Valid(); iter.Next() {
+		entry := iter.Item().Entry()
+		builder.add(entry, false)
+	}
+
+	// 创建一个table对象
+	table := openTable(lm, sstName, builder)
+	// 写入到manifest中
+	err = lm.manifestFile.AddTableMeta(0, &file.TableMeta{
+		ID:       fid,
+		Checksum: []byte{'X', 'X', 'I', 'H'},
+	})
+	utils.Panic(err)
+	// 更新第0层的levelHandler
+	lm.levels[0].add(table)
+	return
+}
 
 // 初始化LevelManager
 func (lsm *LSM) initLevelManager(opt *Options) *levelManager {

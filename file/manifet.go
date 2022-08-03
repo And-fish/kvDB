@@ -393,10 +393,14 @@ func (mf *ManifestFile) AddChanges(changes []*pb.ManifestChange) error {
 }
 
 // 添加Create指令到manifestFile中
-func (mf *ManifestFile) AddTableMeta(levelNum int, table *TableMeta) {
-	mf.addChanges([]*pb.ManifestChange{
+func (mf *ManifestFile) AddTableMeta(levelNum int, table *TableMeta) error {
+	err := mf.addChanges([]*pb.ManifestChange{
 		newCreateChange(table.ID, levelNum, table.Checksum),
 	})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // 删除Manifest中没有使用的sst文件

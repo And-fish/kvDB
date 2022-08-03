@@ -1,30 +1,17 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
-type heloo struct {
-	id uint64
-}
-type Fun func(uint64) error
-
-func (h *heloo) add() func(uint64) error {
-	return func(i uint64) error {
-		h.id += i
-		return nil
-	}
-}
-
-func (h *heloo) g(f Fun) {
-	f(55)
-	return
-}
-
-func (h *heloo) jia() {
-	h.g(h.add())
-	return
-}
 func main() {
-	h := heloo{id: 44}
-	h.jia()
-	fmt.Printf("h: %v\n", h)
+	a := make([][]uint64, 3)
+	a = [][]uint64{[]uint64{1, 2}, []uint64{5, 9}, []uint64{3, 7}, []uint64{3, 3}}
+	sort.Slice(a, func(i, j int) bool {
+		return a[i][0] < a[j][0] || ((a[i][0] == a[j][0]) && (a[i][1] < a[j][1]))
+	})
+
+	fmt.Printf("a: %v\n", a)
+
 }
