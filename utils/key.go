@@ -34,3 +34,11 @@ func IsSameKey(key1, key2 []byte) bool {
 	}
 	return bytes.Equal(ParseKey(key1), ParseKey(key2))
 }
+
+// 为key添加上TimeStamp
+func KeyWithTS(key []byte, ts uint64) []byte {
+	res := make([]byte, len(key)+8)
+	copy(res, key)
+	binary.BigEndian.PutUint64(res[len(key):], math.MaxUint64-ts)
+	return res
+}

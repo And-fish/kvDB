@@ -88,7 +88,7 @@ func (lh *levelHandler) Sort() {
 			return lh.tables[i].fid < lh.tables[j].fid
 		})
 	} else {
-		// 其他层按照Minkey大小排序
+		// 其他层按照Minkey大小排序(从小到大)
 		sort.Slice(lh.tables, func(i, j int) bool {
 			return utils.CompareKeys(lh.tables[i].sst.GetMinKey(), lh.tables[j].sst.GetMinKey()) < 0
 		})
