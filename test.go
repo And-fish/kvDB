@@ -2,22 +2,14 @@ package main
 
 import (
 	"fmt"
-	"reflect"
-	"unsafe"
+	"sort"
 )
 
 func main() {
-	a := make([]byte, 6, 6)
-	b := a[:0]
-	b = append(b, []byte{1, 2, 3}...)
-	fmt.Printf("a: %v\n", a)
-	fmt.Printf("b: %v\n", b)
-	c := a[:3]
-	k := make([]byte, 4, 4)
-	sh := (*reflect.SliceHeader)(unsafe.Pointer(&c))
-	fmt.Printf("c: %v\n", c)
-	sh.Data = uintptr(unsafe.Pointer(&k[0]))
-	fmt.Printf("a: %v\n", a)
-	fmt.Printf("b: %v\n", b)
-	fmt.Printf("c: %v\n", c)
+	// b := []uint{10, 9, 8, 7, 6, 5, 4, 3, 2, 1}
+	c := []uint{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	x := 9 - sort.Search(10, func(i int) bool {
+		return c[9-i] <= 9
+	})
+	fmt.Println(c[x])
 }

@@ -283,3 +283,25 @@ func (lsm *LSM) initLevelManager(opt *Options) *levelManager {
 	lm.build()
 	return lm
 }
+
+type levelHandlerRLocked struct{}
+
+// 获取本层中的左边界和右边界的index，leftIdx可取，RightIdx不可取
+func (lh *levelHandler) overlappingTables(_ levelHandlerRLocked, kr keyRange) (leftIdx, rightIdx int) {
+	if len(kr.left) == 0 || len(kr.right) == 0 {
+		return 0, 0
+	}
+	leftIdx = sort.Search(len(lh.tables), func(i int) bool {
+		// 找到一个table的maxkey是大于leftKey的，这样foundTable的下一个在keyRange中
+		return utils.CompareKeys(kr.left, lh.tables[i].sst.GetMaxKey()) <= 0
+	})
+	rightIdx = sort.Search(len(lh.tables), func(i int) bool {
+		// 找到一个table的maxkey是小于leftKey的，这样foundTable的上一个在keyRange中
+		return utils.CompareKeys(kr.right, lh.tables[i].sst.GetMaxKey()) < 0
+	})
+	// 假设KeyRange = {left:6 right:9}
+	// sst1 == [4,5] sst2 == [6,7] sst3 == [8,9] sst4 == [10,11]
+	// leftIdx会找到一个sst的maxKey正好大于9，也就是 sst2.maxKey=7 >6
+	// rightIdx会找到一个sst的maxKey正好大于，也就是 sst4.maxKey=11 >9
+	return
+}

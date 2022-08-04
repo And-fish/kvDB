@@ -338,3 +338,109 @@ func (titr *tableIterator) Close() error {
 	titr.blockIterator.Close()
 	return titr.table.DecrRef()
 }
+
+// ConcatIterator 会将tables数组链接为一个迭代器，也就是对tableIter
+type ConcatIterator struct {
+	Idx     int              // 当前正在使用第几个Iterator
+	cur     utils.Iterator   // 当前正在使用的iterator
+	iters   []utils.Iterator // iterator数组，对应的tables
+	tables  []*table         // 升序的tables
+	Options *utils.Options
+}
+
+// 根据tables和options创建 ConcatIterator
+func NewConcatIterator(ts []*table, opt *utils.Options) *ConcatIterator {
+	iters := make([]utils.Iterator, len(ts))
+	return &ConcatIterator{
+		Idx:     -1, // 还没有初始化
+		iters:   iters,
+		tables:  ts,
+		Options: opt,
+	}
+}
+
+// 将idx移动到指定的位置，并调整curIter，如果curIter不存在会创建新的
+func (ci *ConcatIterator) setIdx(idx int) {
+	ci.Idx = idx
+	if idx < 0 || idx > len(ci.tables) {
+		ci.cur = nil
+		return
+	}
+	if ci.iters[idx] == nil {
+		ci.iters[idx] = ci.tables[idx].NewIterator(ci.Options)
+	}
+	ci.cur = ci.iters[ci.Idx]
+}
+
+// 从头开始
+func (ci ConcatIterator) Rewind() {
+	if len(ci.iters) == 0 {
+		return
+	}
+	if !ci.Options.IsAsc {
+		ci.setIdx(0)
+	} else {
+		ci.setIdx(len(ci.iters) - 1)
+	}
+	ci.cur.Rewind()
+}
+
+// 判断是否有效
+func (ci *ConcatIterator) Valid() bool {
+	// 注意要先判断是否为nil
+	return ci.cur != nil && ci.cur.Valid()
+}
+
+// Item
+func (ci *ConcatIterator) Item() utils.Item {
+	return ci.cur.Item()
+}
+
+// if reversed == false Seek到element >=key ;else Seek 到 <=key;
+func (ci *ConcatIterator) Seek(key []byte) {
+	var idx int
+	if ci.Options.IsAsc { // 如果是升序的
+		idx = sort.Search(len(ci.tables), func(i int) bool {
+			// 小 --> 大
+			// [minkey1  maxkey1] , [minkey2  key   maxkey2] , [minkey3  maxkey3]
+			return utils.CompareKeys(ci.tables[i].sst.GetMaxKey(), key) >= 0
+		})
+	} else {
+		n := len(ci.tables) - 1
+		// 找到一个element.minKey <= key，且idx最小
+		idx = n - sort.Search(n+1, func(i int) bool {
+			// 大 --> 小
+			// [minkey3  maxkey3] , [minkey2  key   maxkey2] ， [minkey1  maxkey1]
+			return utils.CompareKeys(ci.tables[n-i].sst.GetMinKey(), key) <= 0
+		})
+	}
+	if idx >= len(ci.tables) || idx < 0 {
+		ci.setIdx(-1)
+		return
+	}
+
+	ci.setIdx(idx)
+	ci.cur.Seek(key)
+}
+
+// Next
+func (ci *ConcatIterator) Next() {
+	ci.cur.Next()
+	if ci.cur.Valid() {
+		return
+	}
+	for {
+		if !ci.Options.IsAsc { // 降序 +1
+			ci.setIdx(ci.Idx + 1)
+		} else {
+			ci.setIdx(ci.Idx - 1)
+		}
+		if ci.cur == nil {
+			return
+		}
+		ci.cur.Rewind()
+		if ci.cur.Valid() {
+			break
+		}
+	}
+}

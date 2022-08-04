@@ -26,7 +26,7 @@ type compactStatus struct {
 	tables map[uint64]struct{}
 }
 
-var infRnage = keyRange{
+var infRange = keyRange{
 	inf: true,
 }
 
@@ -70,7 +70,7 @@ func (kr *keyRange) extend(ekr keyRange) {
 
 // 判断是否重合
 func (kr keyRange) overlapsWith(dst keyRange) bool {
-	// 空的keyRange总是和如何keyRange重合
+	// 空的keyRange总是和任何keyRange重合
 	if kr.isEmpty() {
 		return true
 	}
@@ -87,7 +87,7 @@ func (kr keyRange) overlapsWith(dst keyRange) bool {
 		return false
 	}
 	// [kr.left , kr.right] ... [dst.left , dst.right]
-	// 如果kr的右边界是否小于dst的左边界，说明不可能重合
+	// 如果kr的右边界小于dst的左边界，说明不可能重合
 	if utils.CompareKeys(kr.right, dst.left) < 0 {
 		return false
 	}
@@ -104,7 +104,7 @@ func (lcs *levelCompactStatus) overLapsWith(dst keyRange) bool {
 	return false
 }
 
-// 移除本层的某个keyRange，返回本level中是否存在这个keyRange
+// 移除本层的某个keyRange，返回本level中是否曾经存在这个keyRange
 func (lcs *levelCompactStatus) remove(dst keyRange) bool {
 	final := lcs.ranges[:0]
 	var found bool
@@ -147,9 +147,59 @@ func (cs *compactStatus) overlapsWith(i int, kr keyRange) bool {
 	return level.overLapsWith(kr)
 }
 
-// 指定level需要删除的size
+// 获取指定level需要删除的size
 func (cs *compactStatus) delSize(i int) int64 {
 	cs.RLock()
 	defer cs.RUnlock()
 	return cs.levels[i].delSize
+}
+
+// 检查是否有冲突，并将compactDef中的计划添加到compactStatus中
+func (cs *compactStatus) compareAndAdd(_ thisAndNextLevelRLocked, cd compactDef) bool {
+	cs.Lock()
+	defer cs.Unlock()
+
+	i := cd.thisLevel.levelNum
+	utils.CondPanic(i >= len(cs.levels), fmt.Errorf("Got level %d. Max levels: %d", i, len(cs.levels)))
+	thisLevel := cs.levels[cd.thisLevel.levelNum] // 待compact的层级
+	nextLevel := cs.levels[cd.nextLevel.levelNum] // compact到的层级
+
+	// 判断thisLevel中是否有和计划重合的
+	if thisLevel.overLapsWith(cd.thisRange) {
+		return false
+	}
+	// 判断nextLevel中是否有和计划重合的
+	if nextLevel.overLapsWith(cd.nextRange) {
+		return false
+	}
+
+	// 如果没有重合，就将计划添加到各层的Ranges里面
+	thisLevel.ranges = append(thisLevel.ranges, cd.thisRange)
+	nextLevel.ranges = append(nextLevel.ranges, cd.nextRange)
+	thisLevel.delSize += cd.thisSzie // 增加已经被选中的
+	// 添加tables到 top 和 cs.tables中
+	for _, t := range append(cd.top, cd.bot...) {
+		cs.tables[t.fid] = struct{}{}
+	}
+
+	return true
+}
+
+// 在compactStatus中删除compactDef中的变更
+func (cs *compactStatus) delete(cd *compactDef) {
+	cs.Lock()
+	defer cs.Unlock()
+
+	level := cd.thisLevel.levelNum
+	thisLevel := cs.levels[cd.thisLevel.levelNum]
+	nextLevel := cs.levels[cd.nextLevel.levelNum]
+
+	thisLevel.delSize -= cd.thisSzie
+	found := thisLevel.remove(cd.thisRange) // 检查并删除thisLevel中是否存在ThiskeyRange
+
+	//如果nextRange为空不需要删除 或者 如果是thisLevel == nextLevel 也不需要删除(只会发生在Lmax --> Lmax的时候)
+	if cd.thisLevel != cd.nextLevel && !cd.nextRange.isEmpty() {
+		//
+		found = nextLevel.remove(cd.nextRange) && found
+	}
 }

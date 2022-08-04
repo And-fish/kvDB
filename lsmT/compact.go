@@ -206,26 +206,130 @@ func moveL0toFront(prios []compactionPriority) []compactionPriority {
 	return prios
 }
 
-/*
-// 选择当前level的某些tabel合并到目标table
-func (lm *levelManager) doComapct(id int, p compactionPriority) error {
-	level := p.level
-	utils.CondPanic(level >= lm.opt.MaxLevelNum, errors.New("[doCompact] Sanity check. l >= lm.opt.MaxLevelNum")) // Sanity check.
-	// 如果目标targetLevel是L0，就在重新选择一个TargetLevel
-	if p.ts.baseLevel == 0 {
-		p.ts = lm.levelTargets()
+// 将keyRange切分为多个小的keyRange，方便并行执行compact
+func (lm *levelManager) addSplits(cd *compactDef) {
+	cd.splits = cd.splits[:0]
+
+	// 每个携程执行一个
+	width := int(math.Ceil(float64(len(cd.bot)) / 5.0))
+	if width < 3 {
+		width = 3
+	}
+	kr := cd.thisRange
+	kr.extend(cd.nextRange)
+
+	// 用于切分
+	addRange := func(right []byte) {
+		kr.right = utils.Copy(right)
+		cd.splits = append(cd.splits, kr)
+		kr.left = kr.right
 	}
 
-	// 创建真正的压缩计划
-	cd := compactDef{
-		compactorID:  id,
-		cp:           p,
-		ts:           p.ts,
-		thisLevel:    lm.levels[level],
-		dropPrefixes: p.dropPrefixes,
+	for i, t := range cd.bot {
+		if i == len(cd.bot)-1 {
+			addRange([]byte{})
+			return
+		}
+		if i%width == width-1 {
+			right := utils.KeyWithTS(utils.ParseKey(t.sst.GetMaxKey()), math.MaxUint32)
+			addRange(right)
+		}
 	}
 }
-*/
+
+// 从最后一个table开始，为每一个table都创建一个tableIterator
+func iteratorsReversed(ts []*table, opt *utils.Options) []utils.Iterator {
+	iters := make([]utils.Iterator, 0, len(ts))
+	for i := len(ts) - 1; i >= 0; i-- {
+		iters = append(iters, ts[i].NewIterator(opt)) // 向里面添加一个tableIterator
+	}
+	return iters
+}
+
+// 根据compact计划创建builder
+func (lm *levelManager) compactBuildTables(i int, cd compactDef) ([]*table, func() error, error) {
+	topTables := cd.top
+	botTables := cd.bot
+	iterOpt := &utils.Options{
+		IsAsc: true,
+	}
+
+	// 创建一个迭代器
+	newIter := func() []utils.Iterator {
+		var iters []utils.Iterator
+		switch {
+		case i == 0:
+			iters = append(iters, iteratorsReversed(topTables, iterOpt)...)
+		case len(topTables) > 0:
+			iters = []utils.Iterator{topTables[0].NewIterator(iterOpt)}
+		}
+		return append(iters, Ne)
+	}
+}
+
+/* // 总的执行压缩计划入口
+func (lm *levelManager) runCompactDef(id, i int, cd compactDef) (err error) {
+	if len(cd.ts.fileSz) == 0 {
+		return errors.New("Filesizes cannot be zero. Targets are not set")
+	}
+	now := time.Now()
+	thisLevel := cd.thisLevel
+	nextLevel := cd.nextLevel
+
+	utils.CondPanic(len(cd.splits) != 0, errors.New("len(cd.splits) != 0"))
+
+	if thisLevel == nextLevel {
+		// L0 --> L0 || Lmax --> Lmax
+		// 不做特殊处理
+	} else {
+		lm.addSplits(&cd)
+	}
+	//
+	if len(cd.splits) == 0 {
+		cd.splits = append(cd.splits, keyRange{})
+	}
+
+	lm.compactBuildTables
+} */
+
+// // 选择当前level的某些tabel合并到目标table
+// func (lm *levelManager) doComapct(id int, p compactionPriority) error {
+// 	level := p.level
+// 	utils.CondPanic(level >= lm.opt.MaxLevelNum, errors.New("[doCompact] Sanity check. l >= lm.opt.MaxLevelNum")) // Sanity check.
+// 	// 如果目标targetLevel是L0，就在重新选择一个TargetLevel
+// 	if p.ts.baseLevel == 0 {
+// 		p.ts = lm.levelTargets()
+// 	}
+
+// 	// 创建真正的压缩计划
+// 	cd := compactDef{
+// 		compactorID:  id,
+// 		cp:           p,
+// 		ts:           p.ts,
+// 		thisLevel:    lm.levels[level], //
+// 		dropPrefixes: p.dropPrefixes,
+// 	}
+
+// 	// 如果是第0层，会单独处理
+// 	if level == 0 {
+// 		cd.nextLevel = lm.levels[p.ts.baseLevel]
+// 		if !lm.fillTablesL0(&cd) {
+// 			return utils.ErrFillTables
+// 		}
+// 	} else {
+// 		cd.nextLevel = cd.thisLevel
+// 		if !cd.nextLevel.isLastLevel() { // 如果当前不是在最后一层，compact到下一层
+// 			cd.nextLevel = lm.levels[level+1]
+// 		}
+// 		if !lm.fillTables(&cd) { // compact
+// 			return utils.ErrFillTables
+// 		}
+// 	}
+
+// 	// compact success
+// 	defer lm.compactState.
+
+// }
 
 /*
 // 执行一次指定优先级的compact
@@ -240,7 +344,7 @@ func (lm *levelManager) runOnce(id int) bool {
 	// 拿到了每一层的compact优先级
 	prios := lm.pickCompactLevels()
 
-	if id == 0 { // id == 0的协程优先压缩
+	if id == 0 { // id == 0的协程优先压缩L0
 		prios = moveL0toFront(prios)
 	}
 	for _, p := range prios {
