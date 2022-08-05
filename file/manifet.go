@@ -81,7 +81,7 @@ func newCreateChange(tableID uint64, level int, checksum []byte) *pb.ManifestCha
 	}
 }
 
-// 获取manifest的[]Cahnge
+// 获取manifest的[]Change
 func (manifest *Manifest) asChanges() []*pb.ManifestChange {
 	changes := make([]*pb.ManifestChange, 0, len(manifest.Tables))
 	for tableID, tableManifest := range manifest.Tables {

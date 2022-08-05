@@ -417,3 +417,13 @@ func (tb *tableBuilder) flush(lm *levelManager, tableName string) (*table, error
 	copy(sstBuf, buf)
 	return table, nil
 }
+
+// 判断是否满了
+func (tb *tableBuilder) IsReachedCapacity() bool {
+	return tb.estimateSize > tb.sstSzie
+}
+
+// Close
+func (tb *tableBuilder) Close() {
+
+}

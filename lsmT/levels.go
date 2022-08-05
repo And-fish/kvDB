@@ -69,6 +69,12 @@ func (lh *levelHandler) addSize(table *table) {
 	lh.totalStaleSize += int64(table.StaleDataSize())
 }
 
+// 当本层删除了table，也会对totalsize减少大小
+func (lh *levelHandler) subtractSize(table *table) {
+	lh.totalSize -= table.GetSize()
+	lh.totalStaleSize -= int64(table.StaleDataSize())
+}
+
 // 返回对应level的table数量
 func (lh *levelHandler) numTables() int {
 	lh.RLock()
@@ -144,16 +150,21 @@ func (lh *levelHandler) isLastLevel() bool {
 	return lh.levelNum == lh.lm.opt.MaxLevelNum
 }
 
-// TODO
-// func (lh *levelHandler) iterators() []utils.Iterator {
-// 	lh.Lock()
-// 	defer lh.RLock()
+// 在levelHandler层面创建迭代器，也就是一个level的所有tabelItertor
+func (lh *levelHandler) iterators() []utils.Iterator {
+	lh.Lock()
+	defer lh.RLock()
 
-// 	opt := utils.Options{IsAsc: true}
-// 	if lh.levelNum ==0{
-// 		return iter
-// 	}
-// }
+	opt := &utils.Options{IsAsc: true}
+	if lh.levelNum == 0 {
+		return iteratorsReversed(lh.tables, opt)
+	}
+
+	if len(lh.tables) == 0 {
+		return nil
+	}
+	return []utils.Iterator{NewConcatIterator(lh.tables, opt)}
+}
 
 // levelManager
 
@@ -174,7 +185,15 @@ func (lm *levelManager) close() error {
 	return nil
 }
 
-//TODO 迭代器
+// levelManager迭代器
+func (lm *levelManager) iterator() []utils.Iterator {
+	itrs := make([]utils.Iterator, 0, len(lm.levels))
+	for _, level := range lm.levels {
+		// 创建每一个levelHandler的迭代器
+		itrs = append(itrs, level.iterators()...)
+	}
+	return itrs
+}
 
 // 从levelManger中获取查找
 func (lm *levelManager) Get(key []byte) (*utils.Entry, error) {
@@ -273,7 +292,7 @@ func (lm *levelManager) flush(immutable *memTable) (err error) {
 // 初始化LevelManager
 func (lsm *LSM) initLevelManager(opt *Options) *levelManager {
 	lm := &levelManager{lsm: lsm} // 反引用
-	// TODO  lm.compactState =lsm.newcom
+	lm.compactState = lsm.newCompactStatus()
 	lm.opt = opt
 
 	// 构建manifest
@@ -304,4 +323,59 @@ func (lh *levelHandler) overlappingTables(_ levelHandlerRLocked, kr keyRange) (l
 	// leftIdx会找到一个sst的maxKey正好大于9，也就是 sst2.maxKey=7 >6
 	// rightIdx会找到一个sst的maxKey正好大于，也就是 sst4.maxKey=11 >9
 	return
+}
+
+// 将指定levelHandler的tables换成指定的tables
+func (lh *levelHandler) replaceTables(delTables, addTables []*table) error {
+	lh.Lock()
+
+	delMap := make(map[uint64]struct{})
+	for _, t := range delTables {
+		delMap[t.fid] = struct{}{}
+	}
+	var newTables []*table
+	for _, t := range lh.tables {
+		_, ok := delMap[t.fid]
+		if !ok {
+			newTables = append(newTables, t)
+			continue
+		}
+		lh.subtractSize(t)
+	}
+
+	//
+	for _, t := range addTables {
+		lh.addSize(t)
+		t.IncrRef()
+		newTables = append(newTables, t)
+	}
+
+	lh.tables = newTables
+	sort.Slice(lh.tables, func(i, j int) bool {
+		return utils.CompareKeys(lh.tables[i].sst.GetMinKey(), lh.tables[j].sst.GetMaxKey()) < 0
+	})
+	lh.Unlock() // 因为删除tables可能会比较慢，所以提前释放
+	return decrRefs(delTables)
+}
+
+// 删除tables，和replaceTables()的区别在于不会有新的tables添加
+func (lh *levelHandler) deleteTables(tables []*table) error {
+	lh.Lock()
+
+	delMap := make(map[uint64]struct{})
+	for _, t := range tables {
+		delMap[t.fid] = struct{}{}
+	}
+	var newTables []*table
+	for _, t := range lh.tables {
+		_, ok := delMap[t.fid]
+		if !ok {
+			newTables = append(newTables, t)
+			continue
+		}
+		lh.subtractSize(t)
+	}
+	lh.tables = newTables
+	lh.Unlock()
+	return decrRefs(tables)
 }

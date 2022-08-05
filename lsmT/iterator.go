@@ -9,17 +9,60 @@ import (
 	"sort"
 )
 
-type Item struct {
-	entry *utils.Entry
+type memItertor struct {
+	innerIter utils.Iterator
 }
 
-type Iterator struct {
-	item     Item
-	iterator []utils.Iterator
+func (mitr *memItertor) Next() {
+	mitr.innerIter.Next()
+}
+func (mitr *memItertor) Valid() bool {
+	return mitr.innerIter.Valid()
+}
+func (mitr *memItertor) Rewind() {
+	mitr.innerIter.Rewind()
+}
+func (mitr *memItertor) Item() utils.Item {
+	return mitr.innerIter.Item()
+}
+func (mitr *memItertor) Close() error {
+	return mitr.innerIter.Close()
+}
+func (mitr *memItertor) Seek(key []byte) {
 }
 
-func (item *Item) Entry() *utils.Entry {
-	return item.entry
+func (mt *memTable) NewIterator(opt *utils.Options) utils.Iterator {
+	return &memItertor{
+		innerIter: mt.sl.NewSkiplistIterator(),
+	}
+}
+
+// levelManger迭代器
+type levelIterator struct {
+	// None 以后可能会用到
+	item      *utils.Item
+	iterators []*Iterator
+}
+
+// realIterator
+func (lm *levelManager) NewIterator(opt *utils.Options) []utils.Iterator {
+	return lm.iterator()
+}
+func (iter *levelIterator) Next() {
+}
+func (iter *levelIterator) Valid() bool {
+	return false
+}
+func (iter *levelIterator) Rewind() {
+
+}
+func (iter *levelIterator) Item() utils.Item {
+	return &Item{}
+}
+func (iter *levelIterator) Close() error {
+	return nil
+}
+func (iter *levelIterator) Seek(key []byte) {
 }
 
 // blockIterator用于抽象化跳转去每个block
@@ -373,6 +416,8 @@ func (ci *ConcatIterator) setIdx(idx int) {
 }
 
 // 从头开始
+// 如果IsAsc == True，会跳到最后一个tableInterator，配合Next()会下跳到到上一个tableInterator；
+// 如果IsAsc == false，会跳到第一个tableInterator，配合Next()会下跳到到下一个一个tableInterator；
 func (ci ConcatIterator) Rewind() {
 	if len(ci.iters) == 0 {
 		return
@@ -430,6 +475,7 @@ func (ci *ConcatIterator) Next() {
 		return
 	}
 	for {
+		// 如果IsAsc == True 会跳到上一个tableInerator，tableInterator.Rewind会跳到第一个block的第一个entry
 		if !ci.Options.IsAsc { // 降序 +1
 			ci.setIdx(ci.Idx + 1)
 		} else {
@@ -443,4 +489,258 @@ func (ci *ConcatIterator) Next() {
 			break
 		}
 	}
+}
+
+// Close()
+func (ci *ConcatIterator) Close() error {
+	for _, iter := range ci.iters {
+		if iter == nil {
+			continue
+		}
+		if err := iter.Close(); err != nil {
+			return fmt.Errorf("ConcatIterator:%+v", err)
+		}
+	}
+	return nil
+}
+
+// MergeIterator 多路merge迭代器
+type mergeNode struct {
+	valid bool
+	entry *utils.Entry
+	iter  utils.Iterator
+
+	merge  *MergeIterator
+	concat *ConcatIterator
+}
+
+type MergeIterator struct {
+	left  mergeNode
+	right mergeNode
+	small *mergeNode
+
+	curKey  []byte
+	reverse bool
+}
+
+func (mi *MergeIterator) bigger() *mergeNode {
+	if mi.small == &mi.left {
+		return &mi.right
+	}
+	return &mi.left
+}
+
+func (mi *MergeIterator) swapSmall() {
+	if mi.small == &mi.left {
+		mi.small = &mi.right
+		return
+	}
+	if mi.small == &mi.right {
+		mi.small = &mi.left
+		return
+	}
+}
+
+func (mi *MergeIterator) fix() {
+	if !mi.bigger().valid {
+		return
+	}
+	if !mi.small.valid {
+		mi.swapSmall()
+		return
+	}
+	cmp := utils.CompareKeys(mi.small.entry.Key, mi.bigger().entry.Key)
+
+	switch {
+	case cmp == 0:
+		mi.right.next()
+		if &mi.right == mi.small {
+			mi.swapSmall()
+		}
+		return
+	case cmp < 0:
+		if mi.reverse {
+			mi.swapSmall()
+		} else {
+
+		}
+		return
+	default:
+		if mi.reverse {
+
+		} else {
+			mi.swapSmall()
+		}
+		return
+	}
+
+}
+
+func NewMergeIterator(iters []utils.Iterator, reverse bool) utils.Iterator {
+	switch len(iters) {
+	case 0:
+		return &Iterator{}
+	case 1:
+		return iters[0]
+	case 2:
+		mi := &MergeIterator{
+			reverse: reverse,
+		}
+		mi.left.setIterator(iters[0])
+		mi.right.setIterator(iters[1])
+		mi.small = &mi.left
+		return mi
+	}
+	// else:
+	mid := len(iters) >> 1
+	return NewMergeIterator(
+		[]utils.Iterator{
+			NewMergeIterator(iters[:mid], reverse),
+			NewMergeIterator(iters[mid:], reverse),
+		},
+		reverse)
+
+}
+
+func (mi *MergeIterator) Valid() bool {
+	return mi.small.valid
+}
+
+func (mi *MergeIterator) setCurrent() {
+	utils.CondPanic(mi.small.entry == nil && mi.small.valid == true, fmt.Errorf("mi.small.entry is nil"))
+	if mi.small.valid {
+		mi.curKey = append(mi.curKey[:0], mi.small.entry.Key...)
+	}
+}
+
+func (mi *MergeIterator) Next() {
+	for mi.Valid() {
+		if !bytes.Equal(mi.small.entry.Key, mi.curKey) {
+			break
+		}
+		mi.small.next()
+		mi.fix()
+	}
+	mi.setCurrent()
+}
+
+func (mi *MergeIterator) Rewind() {
+	mi.left.rewind()
+	mi.right.rewind()
+	mi.fix()
+	mi.setCurrent()
+}
+
+func (mi *MergeIterator) Seek(key []byte) {
+	mi.left.seek(key)
+	mi.right.seek(key)
+	mi.fix()
+	mi.setCurrent()
+}
+
+func (mi *MergeIterator) Item() utils.Item {
+	return mi.small.iter.Item()
+}
+
+func (mi *MergeIterator) Close() error {
+	err1 := mi.left.iter.Close()
+	err2 := mi.right.iter.Close()
+	if err1 != nil {
+		return utils.WarpErr("MergeIterator", err1)
+	}
+	return utils.WarpErr("MergeIterator", err2)
+}
+
+func (mn *mergeNode) setIterator(iter utils.Iterator) {
+	mn.iter = iter
+	mn.merge, _ = iter.(*MergeIterator)
+	mn.concat, _ = iter.(*ConcatIterator)
+}
+
+func (mn *mergeNode) setKey() {
+	switch {
+	case mn.merge != nil:
+		mn.valid = mn.merge.small.valid
+		if mn.valid {
+			mn.entry = mn.merge.small.entry
+		}
+	case mn.concat != nil:
+		mn.valid = mn.concat.Valid()
+		if mn.valid {
+			mn.entry = mn.concat.Item().Entry()
+		}
+	default:
+		mn.valid = mn.iter.Valid()
+		if mn.valid {
+			mn.entry = mn.iter.Item().Entry()
+		}
+	}
+}
+
+func (mn *mergeNode) next() {
+	switch {
+	case mn.merge != nil:
+		mn.merge.Next()
+	case mn.concat != nil:
+		mn.concat.Next()
+	default:
+		mn.iter.Next()
+	}
+	mn.setKey()
+}
+
+func (mn *mergeNode) rewind() {
+	mn.iter.Rewind()
+	mn.setKey()
+}
+
+func (mn *mergeNode) seek(key []byte) {
+	mn.iter.Seek(key)
+	mn.setKey()
+}
+
+// lsm
+type Item struct {
+	entry *utils.Entry
+}
+
+type Iterator struct {
+	item      Item
+	iterators []utils.Iterator
+}
+
+func (item *Item) Entry() *utils.Entry {
+	return item.entry
+}
+
+func (lsm *LSM) NewIterators(opt *utils.Options) []utils.Iterator {
+	iter := &Iterator{}
+	iter.iterators = make([]utils.Iterator, 0)
+	// iter.iterators[0] 是活跃的skiplist
+	iter.iterators = append(iter.iterators, lsm.memtable.NewIterator(opt))
+	// 后米娜是非活跃的immutable
+	for _, imm := range lsm.immutable {
+		iter.iterators = append(iter.iterators, imm.NewIterator(opt))
+	}
+	// 最后是每一个level的tableItertor
+	iter.iterators = append(iter.iterators, lsm.levels.iterator()...)
+	return iter.iterators
+}
+
+func (iter *Iterator) Next() {
+	iter.iterators[0].Next()
+}
+func (iter *Iterator) Valid() bool {
+	return iter.iterators[0].Valid()
+}
+func (iter *Iterator) Rewind() {
+	iter.iterators[0].Rewind()
+}
+func (iter *Iterator) Item() utils.Item {
+	return iter.iterators[0].Item()
+}
+func (iter *Iterator) Close() error {
+	return nil
+}
+func (iter *Iterator) Seek(key []byte) {
 }

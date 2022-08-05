@@ -2,9 +2,17 @@ package lsmt
 
 import (
 	"errors"
+	"fmt"
+	"kvdb/pb"
 	"kvdb/utils"
+	"log"
 	"math"
+	"math/rand"
 	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // merge的对象
@@ -246,6 +254,108 @@ func iteratorsReversed(ts []*table, opt *utils.Options) []utils.Iterator {
 	return iters
 }
 
+// 更新需要丢失的数据
+func (lm *levelManager) updateDiscardStats(discardStats map[uint32]int64) {
+	select {
+	case *lm.lsm.option.DiscardStatsCh <- discardStats:
+	default:
+	}
+}
+
+// 判断是否过期
+func IsDeletedOrExpired(entry *utils.Entry) bool {
+	if entry.Value == nil {
+		return true
+	}
+	if entry.TTL == 0 {
+		return false
+	}
+	return entry.TTL <= uint64(time.Now().Unix())
+}
+
+// 开始执行并行compact
+func (lm *levelManager) subcompact(itr utils.Iterator, kr keyRange, cd compactDef, va *utils.Valve, res chan<- *table) {
+	var lastKey []byte
+	discardStats := make(map[uint32]int64)
+	defer func() {
+		lm.updateDiscardStats(discardStats)
+	}()
+
+	updateStats := func(entry *utils.Entry) {
+		if entry.Meta&utils.BitValuePointer > 0 {
+			var vp utils.ValuePtr
+			vp.Decode(entry.Value)
+			discardStats[vp.Fid] += int64(vp.Len)
+		}
+	}
+
+	addKeys := func(builder *tableBuilder) {
+		var tkr keyRange
+		for ; itr.Valid(); itr.Next() {
+			key := itr.Item().Entry().Key
+			isExpied := IsDeletedOrExpired(itr.Item().Entry())
+			if !utils.IsSameKey(key, lastKey) {
+				if len(kr.right) > 0 && utils.CompareKeys(key, kr.right) >= 0 {
+					break
+				}
+				if builder.IsReachedCapacity() {
+					break
+				}
+				lastKey = utils.SafeCopy(lastKey, key)
+				if len(tkr.left) == 0 {
+					tkr.left = utils.SafeCopy(tkr.left, key)
+				}
+				tkr.right = lastKey
+			}
+
+			switch {
+			case isExpied:
+				updateStats(itr.Item().Entry())
+				builder.AddStaleKey(itr.Item().Entry())
+			default:
+				builder.Addkey(itr.Item().Entry())
+			}
+		}
+	}
+
+	if len(kr.left) > 0 {
+		itr.Seek(kr.left)
+	} else {
+		itr.Rewind()
+	}
+	for itr.Valid() {
+		key := itr.Item().Entry().Key
+		if len(kr.right) > 0 && utils.CompareKeys(key, kr.right) >= 0 {
+			break
+		}
+		builder := newTableBuilderWithSize(lm.opt, cd.ts.fileSz[cd.nextLevel.levelNum])
+
+		addKeys(builder)
+		if builder.isEmpty() {
+			builder.finish()
+			builder.Close()
+			continue
+		}
+		if err := va.Run(); err != nil {
+			break
+		}
+
+		go func(builder *tableBuilder) {
+			defer va.Done(nil)
+			defer builder.Close()
+
+			var t *table
+			fid := atomic.AddUint64(&lm.maxFID, 1)
+			sstName := utils.FileNameSSTable(lm.opt.WorkDir, fid)
+			t = openTable(lm, sstName, builder) // 这里会增加一次引用
+			if t == nil {
+				return
+			}
+			res <- t
+		}(builder)
+	}
+}
+
 // 根据compact计划创建builder
 func (lm *levelManager) compactBuildTables(i int, cd compactDef) ([]*table, func() error, error) {
 	topTables := cd.top
@@ -254,20 +364,102 @@ func (lm *levelManager) compactBuildTables(i int, cd compactDef) ([]*table, func
 		IsAsc: true,
 	}
 
-	// 创建一个迭代器
+	// 创建一组迭代器
 	newIter := func() []utils.Iterator {
 		var iters []utils.Iterator
 		switch {
 		case i == 0:
+			// 传入的opt.IsAsc == true，所以创建的的[]iterator，Rewind后会跳转到最后一个tableInterator(next会跳转到上一个TableIntera的第一个block的第一个entey)
 			iters = append(iters, iteratorsReversed(topTables, iterOpt)...)
 		case len(topTables) > 0:
 			iters = []utils.Iterator{topTables[0].NewIterator(iterOpt)}
 		}
-		return append(iters, Ne)
+		return append(iters, NewConcatIterator(botTables, iterOpt))
+	}
+
+	// 开始并行的执行压缩过程
+	res := make(chan *table, 3)
+	valve := utils.NewValue(8 + len(cd.splits))
+	for _, kr := range cd.splits {
+		if err := valve.Run(); err != nil {
+			return nil, nil, fmt.Errorf("cannot start subcompaction: %+v", err)
+		}
+
+		go func(kr keyRange) {
+			defer valve.Done(nil)
+
+			it := NewMergeIterator(newIter(), false)
+			defer it.Close()
+			lm.subcompact(it, kr, cd, valve, res) // 会调用openTables增加一次对table的引用
+		}(kr)
+	}
+
+	var tables []*table
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for t := range res {
+			tables = append(tables, t)
+		}
+	}()
+
+	err := valve.Finish()
+	close(res)
+	wg.Wait()
+
+	if err == nil {
+		err = utils.SyncDir(lm.opt.WorkDir)
+	}
+	if err != nil {
+		decrRefs(tables)
+		return nil, nil, fmt.Errorf("while running compactions for: %+v, %v", cd, err)
+	}
+
+	sort.Slice(tables, func(i, j int) bool {
+		return utils.CompareKeys(tables[i].sst.GetMaxKey(), tables[j].sst.GetMaxKey()) < 0
+	})
+	return tables, func() error {
+		return decrRefs(tables)
+	}, nil
+}
+
+// 创建Create的ManifestChange
+func newCreateChange(tableID uint64, level int) *pb.ManifestChange {
+	return &pb.ManifestChange{
+		Id:    tableID,
+		Op:    pb.ManifestChange_CREATE,
+		Level: uint32(level),
 	}
 }
 
-/* // 总的执行压缩计划入口
+// 创建Delete的ManifestChange
+func newDeleteChange(tableID uint64) *pb.ManifestChange {
+	return &pb.ManifestChange{
+		Id: tableID,
+		Op: pb.ManifestChange_DELETE,
+		// DELETE 不需要level
+	}
+}
+
+// 根据compactDef创建ManifestchangeSet
+func buildChangeSet(cd *compactDef, tables []*table) pb.ManifestChangeSet {
+	changes := []*pb.ManifestChange{}
+	for _, table := range tables {
+		changes = append(changes, newCreateChange(table.fid, cd.nextLevel.levelNum))
+	}
+	for _, table := range cd.top {
+		changes = append(changes, newDeleteChange(table.fid))
+	}
+	for _, table := range cd.bot {
+		changes = append(changes, newDeleteChange(table.fid))
+	}
+	return pb.ManifestChangeSet{
+		Changes: changes,
+	}
+}
+
+// 总的执行压缩计划入口
 func (lm *levelManager) runCompactDef(id, i int, cd compactDef) (err error) {
 	if len(cd.ts.fileSz) == 0 {
 		return errors.New("Filesizes cannot be zero. Targets are not set")
@@ -289,56 +481,109 @@ func (lm *levelManager) runCompactDef(id, i int, cd compactDef) (err error) {
 		cd.splits = append(cd.splits, keyRange{})
 	}
 
-	lm.compactBuildTables
-} */
+	tables, decrFunc, err := lm.compactBuildTables(i, cd) //这里会增加一次会tables的引用
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// 减少一次对tables引用
+		if decErr := decrFunc(); err == nil {
+			err = decErr
+		}
+	}()
+	changeSet := buildChangeSet(&cd, tables)
 
-// // 选择当前level的某些tabel合并到目标table
-// func (lm *levelManager) doComapct(id int, p compactionPriority) error {
-// 	level := p.level
-// 	utils.CondPanic(level >= lm.opt.MaxLevelNum, errors.New("[doCompact] Sanity check. l >= lm.opt.MaxLevelNum")) // Sanity check.
-// 	// 如果目标targetLevel是L0，就在重新选择一个TargetLevel
-// 	if p.ts.baseLevel == 0 {
-// 		p.ts = lm.levelTargets()
-// 	}
+	if err := lm.manifestFile.AddChanges(changeSet.Changes); err != nil {
+		return err
+	}
+	// 在levelHandler中删除旧的table cd.bot，添加新的tables
+	if err := nextLevel.replaceTables(cd.bot, tables); err != nil { // 这里会增加一次对tables引用
+		return err
+	}
+	// 还会删除cd.top
+	defer decrRefs(cd.top)
+	// 删除减少一次引用，并将top中thislevel中删除
+	if err := thisLevel.deleteTables(cd.top); err != nil {
+		return err
+	}
 
-// 	// 创建真正的压缩计划
-// 	cd := compactDef{
-// 		compactorID:  id,
-// 		cp:           p,
-// 		ts:           p.ts,
-// 		thisLevel:    lm.levels[level], //
-// 		dropPrefixes: p.dropPrefixes,
-// 	}
+	// DEBUG
+	from := append(tablesToString(cd.top), tablesToString(cd.bot)...)
+	to := tablesToString(tables)
+	if dur := time.Since(now); dur > 2*time.Second {
+		var expensive string
+		if dur > time.Second {
+			expensive = " [E]"
+		}
+		fmt.Printf("[%d]%s LOG Compact %d->%d (%d, %d -> %d tables with %d splits)."+
+			" [%s] -> [%s], took %v\n",
+			id, expensive, thisLevel.levelNum, nextLevel.levelNum, len(cd.top), len(cd.bot),
+			len(tables), len(cd.splits), strings.Join(from, " "), strings.Join(to, " "),
+			dur.Round(time.Millisecond))
+	}
+	return nil
+}
 
-// 	// 如果是第0层，会单独处理
-// 	if level == 0 {
-// 		cd.nextLevel = lm.levels[p.ts.baseLevel]
-// 		if !lm.fillTablesL0(&cd) {
-// 			return utils.ErrFillTables
-// 		}
-// 	} else {
-// 		cd.nextLevel = cd.thisLevel
-// 		if !cd.nextLevel.isLastLevel() { // 如果当前不是在最后一层，compact到下一层
-// 			cd.nextLevel = lm.levels[level+1]
-// 		}
-// 		if !lm.fillTables(&cd) { // compact
-// 			return utils.ErrFillTables
-// 		}
-// 	}
+// 选择当前level的某些tabel合并到目标table
+func (lm *levelManager) doComapct(id int, p compactionPriority) error {
+	level := p.level
+	utils.CondPanic(level >= lm.opt.MaxLevelNum, errors.New("[doCompact] Sanity check. l >= lm.opt.MaxLevelNum")) // Sanity check.
+	// 如果目标targetLevel是L0，就在重新选择一个TargetLevel
+	if p.ts.baseLevel == 0 {
+		p.ts = lm.levelTargets()
+	}
 
-// 	// compact success
-// 	defer lm.compactState.
+	// 创建真正的压缩计划
+	cd := compactDef{
+		compactorID:  id,
+		cp:           p,
+		ts:           p.ts,
+		thisLevel:    lm.levels[level], //
+		dropPrefixes: p.dropPrefixes,
+	}
 
-// }
+	// 如果是第0层，会单独处理
+	if level == 0 {
+		cd.nextLevel = lm.levels[p.ts.baseLevel]
+		if !lm.fillTablesL0(&cd) {
+			return utils.ErrFillTables
+		}
+	} else {
+		cd.nextLevel = cd.thisLevel
+		if !cd.nextLevel.isLastLevel() { // 如果当前不是在最后一层，compact到下一层
+			cd.nextLevel = lm.levels[level+1]
+		}
+		if !lm.fillTables(&cd) { // compact
+			return utils.ErrFillTables
+		}
+	}
 
-/*
+	// compactDef success
+	defer lm.compactState.delete(&cd)
+
+	// 执行策略
+	if err := lm.runCompactDef(id, level, cd); err != nil {
+		log.Printf("[Compactor: %d] LOG Compact FAILED with error: %+v: %+v", id, err, cd)
+		return err
+	}
+
+	log.Printf("[Compactor: %d] Compaction for level: %d DONE", id, cd.thisLevel.levelNum)
+	return nil
+}
+
 // 执行一次指定优先级的compact
 func (lm *levelManager) run(id int, p compactionPriority) bool {
-
+	err := lm.doComapct(id, p)
+	switch err {
+	case nil:
+		return true
+	case utils.ErrFillTables:
+	default:
+		log.Printf("[taskID:%d] While running doCompact: %v\n ", id, err)
+	}
+	return false
 }
-*/
 
-/*
 // 执行一次compact
 func (lm *levelManager) runOnce(id int) bool {
 	// 拿到了每一层的compact优先级
@@ -359,9 +604,7 @@ func (lm *levelManager) runOnce(id int) bool {
 	// 优先分数小于 1的level会跳出到这里，返回没有compact
 	return false
 }
-*/
 
-/*
 // 启动一个定时compact程序(协程)
 func (lm *levelManager) runCompacter(id int) {
 	defer lm.lsm.closer.Done()
@@ -387,4 +630,13 @@ func (lm *levelManager) runCompacter(id int) {
 		}
 	}
 }
-*/
+
+// debug，tablesToString
+func tablesToString(tables []*table) []string {
+	var res []string
+	for _, t := range tables {
+		res = append(res, fmt.Sprintf("%05d", t.fid))
+	}
+	res = append(res, ".")
+	return res
+}

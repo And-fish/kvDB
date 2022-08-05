@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"kvdb/utils"
+	"log"
 	"sync"
 )
 
@@ -154,7 +155,7 @@ func (cs *compactStatus) delSize(i int) int64 {
 	return cs.levels[i].delSize
 }
 
-// 检查是否有冲突，并将compactDef中的计划添加到compactStatus中
+// 检查是否有冲突，并将compactDef中的计划添加到compactStatus中，并将bot中的tables append到top中
 func (cs *compactStatus) compareAndAdd(_ thisAndNextLevelRLocked, cd compactDef) bool {
 	cs.Lock()
 	defer cs.Unlock()
@@ -197,9 +198,27 @@ func (cs *compactStatus) delete(cd *compactDef) {
 	thisLevel.delSize -= cd.thisSzie
 	found := thisLevel.remove(cd.thisRange) // 检查并删除thisLevel中是否存在ThiskeyRange
 
-	//如果nextRange为空不需要删除 或者 如果是thisLevel == nextLevel 也不需要删除(只会发生在Lmax --> Lmax的时候)
+	//如果nextRange为空不需要删除 或者 如果是thisLevel == nextLevel 也不需要删除(只会发生在Lmax --> Lmax的时候，这时候这个会在下一轮到Lmax的compact时被覆盖)
 	if cd.thisLevel != cd.nextLevel && !cd.nextRange.isEmpty() {
 		//
 		found = nextLevel.remove(cd.nextRange) && found
+	}
+
+	// DEBUG
+	if !found {
+		this := cd.thisRange
+		next := cd.nextRange
+		fmt.Printf("Looking for: %s in this level %d.\n", this, level)
+		fmt.Printf("This Level:\n%s\n", thisLevel.debug())
+		fmt.Println()
+		fmt.Printf("Looking for: %s in next level %d.\n", next, cd.nextLevel.levelNum)
+		fmt.Printf("Next Level:\n%s\n", nextLevel.debug())
+		log.Fatal("keyRange not found")
+	}
+	// 在全局变量的compactStatus中删除bot和top的tables
+	for _, t := range append(cd.top, cd.bot...) {
+		_, ok := cs.tables[t.fid]
+		utils.CondPanic(!ok, fmt.Errorf("cs.tables is nil"))
+		delete(cs.tables, t.fid)
 	}
 }

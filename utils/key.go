@@ -42,3 +42,8 @@ func KeyWithTS(key []byte, ts uint64) []byte {
 	binary.BigEndian.PutUint64(res[len(key):], math.MaxUint64-ts)
 	return res
 }
+
+// copy
+func SafeCopy(needKey, key []byte) []byte {
+	return append(needKey[:0], key...)
+}

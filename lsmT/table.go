@@ -269,3 +269,13 @@ func (table *table) NewIterator(opt *utils.Options) utils.Iterator {
 func (table *table) StaleDataSize() uint32 {
 	return table.sst.GetIndexs().StaleDataSize
 }
+
+// 对tables中所有的table都减少一次引用，主要是用于对merge table错误时的洗盘操作
+func decrRefs(tables []*table) error {
+	for _, table := range tables {
+		if err := table.DecrRef(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
