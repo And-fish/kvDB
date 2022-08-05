@@ -79,44 +79,45 @@ func openTable(lm *levelManager, tableName string, buider *tableBuilder) *table 
 		sstSize = int(buider.done().size)
 	}
 
-	var table *table
+	var t *table
 	var err error
 	fid := utils.FID(tableName)
 	// 如果传入了builder，说明需要根据将buider flush到磁盘
 	if buider != nil {
-		table, err = buider.flush(lm, tableName)
+		t, err = buider.flush(lm, tableName)
 		if err != nil {
 			utils.Err(err)
 			return nil
 		}
 	} else { // 否则就尝试加载一个sst文件
 		// 创建table
-		table.lm = lm
-		table.fid = fid
+		t = &table{}
+		t.lm = lm
+		t.fid = fid
 		// 初始化MmapFile
-		table.sst = file.OpenSSTable(&file.Options{
+		t.sst = file.OpenSSTable(&file.Options{
 			FileName: tableName,
 			Dir:      lm.opt.WorkDir,
 			Flag:     os.O_CREATE | os.O_RDWR,
 			MaxSz:    sstSize,
 		})
 	}
-	table.IncrRef()
+	t.IncrRef()
 	// 初始化sstable(根据的是sstable.file也就是MmapFile)
-	if err := table.sst.Init(); err != nil {
+	if err := t.sst.Init(); err != nil {
 		utils.Err(err)
 		return nil
 	}
 
-	itr := table.NewIterator(&utils.Options{}) //默认IsAsc == false
+	itr := t.NewIterator(&utils.Options{}) //默认IsAsc == false
 	defer itr.Close()
 	// 当前初始位置就是maxkey
 	itr.Rewind()
 	utils.CondPanic(!itr.Valid(), errors.Errorf("failed to read index, form maxKey"))
 	maxKey := itr.Item().Entry().Key
-	table.sst.SetMaxKey(maxKey)
+	t.sst.SetMaxKey(maxKey)
 
-	return table
+	return t
 }
 
 // 获取table的对应i的BlockOffset

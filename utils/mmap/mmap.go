@@ -87,5 +87,5 @@ func madvise(buf []byte, readahead bool) error {
 // int msync(void *addr, size_t length, int flags);
 func msync(buf []byte) error {
 	// MS_SYNC请求写入，等到写入完成后再返回
-	return unix.Msync(buf, unix.MAP_SYNC)
+	return unix.Msync(buf, unix.MS_SYNC)
 }

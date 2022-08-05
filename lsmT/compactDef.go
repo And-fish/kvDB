@@ -127,7 +127,7 @@ func (lm *levelManager) fillTablesL0ToL0(cd *compactDef) bool {
 	utils.CondPanic(cd.thisLevel.levelNum != 0, errors.New("cd.thisLevel.levelNum != 0"))
 	utils.CondPanic(cd.nextLevel.levelNum != 0, errors.New("cd.nextLevel.levelNum != 0"))
 	lm.levels[0].RLock()
-	defer lm.levels[0].Unlock()
+	defer lm.levels[0].RUnlock()
 
 	top := cd.thisLevel.tables
 	var out []*table

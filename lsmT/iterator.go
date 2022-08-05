@@ -719,7 +719,7 @@ func (lsm *LSM) NewIterators(opt *utils.Options) []utils.Iterator {
 	// iter.iterators[0] 是活跃的skiplist
 	iter.iterators = append(iter.iterators, lsm.memtable.NewIterator(opt))
 	// 后米娜是非活跃的immutable
-	for _, imm := range lsm.immutable {
+	for _, imm := range lsm.immutables {
 		iter.iterators = append(iter.iterators, imm.NewIterator(opt))
 	}
 	// 最后是每一个level的tableItertor

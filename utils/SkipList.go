@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"strings"
 	"sync/atomic"
 	"unsafe"
 )
@@ -223,24 +224,24 @@ func (s *SkipList) findNear(key []byte, less, allowEqual bool) (*skiplistNode, b
 
 // 从beforNpde开始在level层找到一个适合key insert的index，beforeKey < Key < nextNode
 // 返回beforeOffset 和 nextNodeOffset
-func (s *SkipList) findInsertForLevel(key []byte, beginNodeOffset uint32, level int) (beforeNodeOffset, nextNodeOffset uint32) {
+func (s *SkipList) findInsertForLevel(key []byte, beforeNodeOffset uint32, level int) (uint32, uint32) {
 	for {
 		beforeNode := s.arena.getNode(beforeNodeOffset)
-		nextNodeOffset = beforeNode.getNextNodeOffset(level)
+		nextNodeOffset := beforeNode.getNextNodeOffset(level)
 		nextNode := s.arena.getNode(nextNodeOffset)
 		if nextNode == nil {
-			return
+			return beforeNodeOffset, nextNodeOffset
 		}
 		nextKey := nextNode.getKey(s.arena)
 		cmp := CompareKeys(key, nextKey)
 		if cmp == 0 {
 			// 如果找到了相等的节点
-			beforeNodeOffset = nextNodeOffset
-			return
+
+			return nextNodeOffset, nextNodeOffset
 		}
 		// 如果找到了某个nextNodeKey > Key，说明 beforeKey < key < nextKey
 		if cmp < 0 {
-			return
+			return beforeNodeOffset, nextNodeOffset
 		}
 		// 如果nextKey < key，继续找
 		beforeNodeOffset = nextNodeOffset
@@ -259,8 +260,7 @@ func (s *SkipList) Add(e *Entry) {
 	var prevNodes [maxLevel + 1]uint32
 	var nextNodes [maxLevel + 1]uint32
 	prevNodes[sheight] = s.headOffset
-
-	for i := int(sheight); i >= 0; i-- {
+	for i := int(sheight) - 1; i >= 0; i-- {
 		prevNodes[i], nextNodes[i] = s.findInsertForLevel(key, prevNodes[i+1], i)
 		if prevNodes[i] == nextNodes[i] {
 			valueOffset := s.arena.putVal(val)
@@ -363,4 +363,57 @@ func (s *SkipList) findLast() *skiplistNode {
 
 func (sl *SkipList) GetSize() int64 {
 	return sl.arena.szie()
+}
+
+// Draw plot Skiplist, align represents align the same node in different level
+func (s *SkipList) Draw(align bool) {
+	reverseTree := make([][]string, s.getHeight())
+	head := s.getHead()
+	for level := int(s.getHeight()) - 1; level >= 0; level-- {
+		next := head
+		for {
+			var nodeStr string
+			next = s.getNextNode(next, level)
+			if next != nil {
+				key := next.getKey(s.arena)
+				vs := next.getValueStruct(s.arena)
+				nodeStr = fmt.Sprintf("%s(%s)", key, vs.Value)
+			} else {
+				break
+			}
+			reverseTree[level] = append(reverseTree[level], nodeStr)
+		}
+	}
+
+	// align
+	if align && s.getHeight() > 1 {
+		baseFloor := reverseTree[0]
+		for level := 1; level < int(s.getHeight()); level++ {
+			pos := 0
+			for _, ele := range baseFloor {
+				if pos == len(reverseTree[level]) {
+					break
+				}
+				if ele != reverseTree[level][pos] {
+					newStr := fmt.Sprintf(strings.Repeat("-", len(ele)))
+					reverseTree[level] = append(reverseTree[level][:pos+1], reverseTree[level][pos:]...)
+					reverseTree[level][pos] = newStr
+				}
+				pos++
+			}
+		}
+	}
+
+	// plot
+	for level := int(s.getHeight()) - 1; level >= 0; level-- {
+		fmt.Printf("%d: ", level)
+		for pos, ele := range reverseTree[level] {
+			if pos == len(reverseTree[level])-1 {
+				fmt.Printf("%s  ", ele)
+			} else {
+				fmt.Printf("%s->", ele)
+			}
+		}
+		fmt.Println()
+	}
 }

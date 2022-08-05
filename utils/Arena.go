@@ -6,7 +6,7 @@ import (
 )
 
 const maxNodeSize = int(unsafe.Sizeof(skiplistNode{}))
-const alignOffset = int(unsafe.Sizeof(uint8(0)))
+const alignOffset = int(unsafe.Sizeof(uint64(0))) - 1
 
 type Arena struct {
 	n       uint32
@@ -24,7 +24,8 @@ func newArena(size int64) *Arena {
 
 func (a *Arena) allocate(size uint32) uint32 {
 	newoffset := atomic.AddUint32(&a.n, size)
-	if a.growing {
+	if !a.growing {
+		AssertTrue(int(newoffset) <= len(a.buf))
 		return newoffset - size
 	}
 	if int(newoffset) > len(a.buf)-maxNodeSize {
@@ -49,14 +50,18 @@ func (a *Arena) putNode(height int) uint32 {
 	return rwOffset
 }
 func (a *Arena) getNode(offset uint32) *skiplistNode {
+	if offset == 0 {
+		return nil
+	}
+
 	return (*skiplistNode)(unsafe.Pointer(&a.buf[offset]))
 }
 
 func (a *Arena) putKey(key []byte) uint32 {
-	keysize := len(key)
+	keysize := uint32(len(key))
 	offset := a.allocate(uint32(keysize))
-	keybuf := a.buf[alignOffset : alignOffset+keysize]
-	copy(keybuf, key)
+	keybuf := a.buf[offset : offset+keysize]
+	AssertTrue(len(key) == copy(keybuf, key))
 	return offset
 }
 func (a *Arena) getKey(keyOffset uint32, keySize uint16) []byte {

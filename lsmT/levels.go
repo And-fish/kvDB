@@ -78,7 +78,7 @@ func (lh *levelHandler) subtractSize(table *table) {
 // 返回对应level的table数量
 func (lh *levelHandler) numTables() int {
 	lh.RLock()
-	defer lh.Unlock()
+	defer lh.RUnlock()
 
 	return len(lh.tables)
 }
@@ -147,7 +147,7 @@ func (lh *levelHandler) Get(key []byte) (*utils.Entry, error) {
 
 // 检查是不是到最后一个level
 func (lh *levelHandler) isLastLevel() bool {
-	return lh.levelNum == lh.lm.opt.MaxLevelNum
+	return lh.levelNum == lh.lm.opt.MaxLevelNum-1
 }
 
 // 在levelHandler层面创建迭代器，也就是一个level的所有tabelItertor
@@ -240,7 +240,7 @@ func (lm *levelManager) build() error {
 	}
 
 	// 加载所有table中的sstable去构建cache
-	lm.cache = newCache()
+	lm.cache = newCach(lm.opt)
 	// tableIndex被加载到了sstable中，这里会减少读磁盘，但是会增大内存的消耗
 	var maxFID uint64
 	for fid, tableManifest := range manifest.Tables {

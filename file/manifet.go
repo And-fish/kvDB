@@ -236,7 +236,7 @@ func ReplayManifestFile(file *os.File) (manifest *Manifest, truncOffset int64, e
 		truncOffset = reader.count
 		var lenCrcBuf [8]byte
 		// change_len + checksum
-		_, err = io.ReadFull(reader, lenCrcBuf[:])
+		_, err := io.ReadFull(reader, lenCrcBuf[:])
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF { // 读完了就break
 				break
@@ -300,6 +300,7 @@ func OpenManifestFile(opt *Options) (*ManifestFile, error) {
 	// 如果成功打开，将MANIFEST文件加载到manifest中
 	manifest, truncOffset, err := ReplayManifestFile(f)
 	if err != nil {
+		_ = f.Close()
 		return mf, err
 	}
 

@@ -1,25 +1,16 @@
 package lsmt
 
 import (
-	"bytes"
-	"io/ioutil"
-	"kvdb/file"
 	"kvdb/utils"
-	"os"
-	"sort"
-	"strconv"
-	"strings"
-
-	"github.com/pkg/errors"
 )
 
 type LSM struct {
-	memtable  *memTable
-	immutable []*memTable
-	levels    *levelManager
-	option    *Options
-	closer    *utils.Closer
-	maxMemFID uint32
+	memtable   *memTable
+	immutables []*memTable
+	levels     *levelManager
+	option     *Options
+	closer     *utils.Closer
+	maxMemFID  uint32
 }
 type Options struct {
 	WorkDir      string
@@ -42,18 +33,32 @@ type Options struct {
 	DiscardStatsCh *chan map[uint32]int64
 }
 
+// 根据OPT创建新的LSM
+func NewLSM(opt *Options) *LSM {
+	lsm := &LSM{
+		option: opt,
+	}
+	// 初始化levelManager，包括
+	lsm.levels = lsm.initLevelManager(opt)
+	lsm.memtable, lsm.immutables = lsm.recovery()
+	lsm.closer = utils.NewCloser()
+
+	return lsm
+}
+
+// Close
 func (lsm *LSM) Close() error {
 	// 等待所有携程工作完毕
 	lsm.closer.Close()
 
 	if lsm.memtable != nil {
-		if err := lsm.memtable.Close(); err != nil {
+		if err := lsm.memtable.close(); err != nil {
 			return err
 		}
 	}
-	for i := range lsm.immutable {
-		immutable := lsm.immutable[i]
-		if err := immutable.Close(); err != nil {
+	for i := range lsm.immutables {
+		immutable := lsm.immutables[i]
+		if err := immutable.close(); err != nil {
 			return err
 		}
 	}
@@ -63,82 +68,80 @@ func (lsm *LSM) Close() error {
 	return nil
 }
 
-// 通过fid打开memTable
-func (lsm *LSM) openMemTable(fid uint64) (*memTable, error) {
-	opt := &file.Options{
-		Dir:      lsm.option.WorkDir,
-		Flag:     os.O_RDWR | os.O_CREATE,
-		MaxSz:    int(lsm.option.MemTableSize),
-		FID:      fid,
-		FileName: memTableFilePath(lsm.option.WorkDir, fid),
+// StartCompacter 开始compact
+func (lsm *LSM) StartCompacter() {
+	n := lsm.option.NumCompactors
+	lsm.closer.Add(n) // 添加正在等待的协程
+	for i := 0; i < n; i++ {
+		go lsm.levels.runCompacter(i) // 启动n个compact协程
 	}
-	skiplist := utils.NewSkiplist(1 << 20)
-	mt := &memTable{
-		sl:  skiplist,
-		buf: &bytes.Buffer{},
-		lsm: lsm,
-	}
-	mt.wal = file.OpenWalFile(opt)
-	err := mt.UpdateSkipList()
-	utils.CondPanic(err != nil, errors.WithMessage(err, "while updating skiplist"))
-	return mt, nil
 }
 
-// 恢复memTbale
-func (lsm *LSM) recovery() (*memTable, []*memTable) {
-	// 从workDir下面获取所有的文件
-	files, err := ioutil.ReadDir(lsm.option.WorkDir)
-	if err != nil {
-		utils.Err(err)
-		return nil, nil
-	}
-	var fids []uint64
-	maxFid := lsm.levels.maxFID
-	for _, file := range files {
-		if !strings.HasSuffix(file.Name(), walFileExt) { // 如果不是wal结尾的文件直接跳过
-			continue
-		}
-		fileNameSz := len(file.Name())
-		fid, err := strconv.ParseUint(file.Name()[:fileNameSz-len(walFileExt)], 10, 64) // 将fileName转化为10进制的 uint64
-
-		if maxFid < fid {
-			maxFid = fid
-		}
-		if err != nil {
-			utils.Panic(err)
-			return nil, nil
-		}
-		fids = append(fids, fid)
-	}
-
-	// 将fids排序
-	sort.Slice(fids, func(i, j int) bool {
-		return fids[i] < fids[j]
-	})
-	immuTables := []*memTable{}
-	// 遍历所有的fid
-	for _, fid := range fids {
-		mt, err := lsm.openMemTable(fid)
-		utils.CondPanic(err != nil, err)
-		if mt.sl.GetSize() == 0 {
-			continue
-		}
-		immuTables = append(immuTables, mt)
-	}
-	// 最后更新一下maxFid
-	lsm.levels.maxFID = maxFid
-	return lsm.NewMemtable(), immuTables
+// Rotate，将memtable添加到immutables中，再创建新的memtable
+func (lsm *LSM) Rotate() {
+	lsm.immutables = append(lsm.immutables, lsm.memtable)
+	lsm.memtable = lsm.NewMemtable()
 }
 
-// 根据OPT创建新的LSM
-func NewLSM(opt *Options) *LSM {
-	lsm := &LSM{
-		option: opt,
+// Set
+func (lsm *LSM) Set(entry *utils.Entry) (err error) {
+	if entry == nil || len(entry.Key) == 0 {
+		return utils.ErrEmptyKey
 	}
-	// 初始化levelManager，包括
-	lsm.levels = lsm.initLevelManager(opt)
-	lsm.memtable, lsm.immutable = lsm.recovery()
-	lsm.closer = utils.NewCloser()
+	// 关闭
+	lsm.closer.Add(1)
+	defer lsm.closer.Done()
 
-	return lsm
+	// 如果memtable满了会重新构建一个memtable
+	if int64((lsm.memtable.wal.GetSize() + uint32(utils.EstimateWalCodecSize(entry)))) > lsm.option.MemTableSize {
+		lsm.Rotate()
+	}
+	if err = lsm.memtable.set(entry); err != nil { // 添加到memtable中
+		return
+	}
+	for _, immutable := range lsm.immutables {
+		if err = lsm.levels.flush(immutable); err != nil { // 将immutable flush到L0层磁盘中
+			return
+		}
+
+		err = immutable.close() // 回收掉wal文件
+		utils.Panic(err)
+	}
+	if len(lsm.immutables) != 0 {
+		lsm.immutables = make([]*memTable, 0)
+	}
+	return err
+}
+
+// Get
+func (lsm *LSM) Get(key []byte) (*utils.Entry, error) {
+	if len(key) == 0 {
+		return nil, utils.ErrEmptyKey
+	}
+	lsm.closer.Add(1)
+	defer lsm.closer.Done()
+
+	var entry *utils.Entry
+	var err error
+	if entry, err = lsm.memtable.Get(key); entry != nil && entry.Value != nil {
+		return entry, err
+	}
+	// 从后往前查，因为后面的immutable被认为是更新的
+	for i := len(lsm.immutables) - 1; i >= 0; i-- {
+		if entry, err = lsm.memtable.Get(key); entry != nil && entry.Value != nil {
+			return entry, err
+		}
+	}
+	// 从level manager中查询
+	return lsm.levels.Get(key)
+}
+
+func (lsm *LSM) MemSize() int64 {
+	return lsm.memtable.GetSize()
+}
+func (lsm *LSM) MemTableIsNil() bool {
+	return lsm.memtable == nil
+}
+func (lsm *LSM) GetSkipListFromMemTable() *utils.SkipList {
+	return lsm.memtable.sl
 }

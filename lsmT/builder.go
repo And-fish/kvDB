@@ -3,9 +3,11 @@ package lsmt
 import (
 	"errors"
 	"fmt"
+	"kvdb/file"
 	"kvdb/pb"
 	"kvdb/utils"
 	"math"
+	"os"
 	"unsafe"
 )
 
@@ -357,7 +359,7 @@ func (tb *tableBuilder) done() buildData {
 	buildData.index = blockindex
 	buildData.checksum = checksum
 	// 总大小为blockData + BlcokIndex + checksum_len + blockindex_len
-	buildData.size = int(dataSize) + len(blockindex) + 4 + 4
+	buildData.size = int(dataSize) + len(blockindex) + 4 + 4 + len(checksum)
 	return buildData
 }
 
@@ -404,6 +406,14 @@ func (tb *tableBuilder) flush(lm *levelManager, tableName string) (*table, error
 		lm:  lm,
 		fid: utils.FID(tableName),
 	}
+
+	table.sst = file.OpenSSTable(&file.Options{
+		FileName: tableName,
+		Dir:      lm.opt.WorkDir,
+		Flag:     os.O_CREATE | os.O_RDWR,
+		MaxSz:    builddata.size,
+	})
+
 	buf := make([]byte, builddata.size)
 	// 将buildData写入到buf中，返回长度
 	written := builddata.Copy(buf)

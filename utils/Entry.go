@@ -34,7 +34,7 @@ type ValueStruct struct {
 
 // 计算ValueStruct中TTL的大小
 func GetIntSize(intval uint64) int {
-	size := 1
+	size := 0
 	for {
 		size++
 		intval >>= 7
@@ -55,7 +55,7 @@ func (v *ValueStruct) ValEncodedSize() uint32 {
 // 将Value编码到传入的buf上，返回大小
 func (v *ValueStruct) ValEncoding(buf []byte) uint32 {
 	buf[0] = v.Meta
-	ttlsize := binary.PutUvarint(buf, v.TTL)
+	ttlsize := binary.PutUvarint(buf[1:], v.TTL)
 	n := copy(buf[1+ttlsize:], v.Value)
 	return uint32(n + ttlsize + 1)
 }

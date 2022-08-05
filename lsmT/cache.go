@@ -16,7 +16,7 @@ type blockBuffer struct {
 const defaultCacheSize = 1024
 
 // 创建新cache
-func newCache() *cache {
+func newCach(opt *Options) *cache {
 	return &cache{
 		indexs: afCache.NewCache(defaultCacheSize),
 		blocks: afCache.NewCache(defaultCacheSize),

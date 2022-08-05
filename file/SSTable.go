@@ -75,6 +75,7 @@ func (sst *SSTable) readCheckError(offset, size int) []byte {
 // 初始化SSTable
 func (sst *SSTable) initSSTable() (BOffset *pb.BlockOffset, err error) {
 	dataSize := len(sst.file.Data)
+
 	dataSize -= 4
 	// 读取最后四个byte作为Checksum_len
 	buf := sst.readCheckError(dataSize, 4)

@@ -61,9 +61,9 @@ func (si *SkipListIterator) Close() error {
 	return nil
 }
 func (si *SkipListIterator) Next() {
-	if si.Valid() {
-		si.skiplist.getNextNode(si.node, 0)
-	}
+	AssertTrue(si.Valid())
+	si.node = si.skiplist.getNextNode(si.node, 0)
+
 }
 func (si *SkipListIterator) Prev() {
 	if si.Valid() {
