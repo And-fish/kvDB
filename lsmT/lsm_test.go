@@ -224,7 +224,7 @@ func baseTest(t *testing.T, lsm *LSM, n int) {
 	// 用来跟踪调试的
 	e := &utils.Entry{
 		Key:   []byte("Hello😁熊玺皓WeChat ：Christmas_relation"),
-		Value: []byte("我草了"),
+		Value: []byte("你好你好"),
 		TTL:   123,
 	}
 	//caseList := make([]*utils.Entry, 0)
