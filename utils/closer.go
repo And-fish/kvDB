@@ -30,7 +30,7 @@ func (c *Closer) Done() {
 	c.waiting.Done()
 }
 
-// Add用于表示需要等待的下游携程+n
+// Add用于表示需要等待的下游协程+n
 func (c *Closer) Add(n int) {
 	// 加n
 	c.waiting.Add(n)

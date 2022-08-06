@@ -20,17 +20,20 @@ type ValuePtr struct {
 const ValueLogHeaderSize = 20
 const vptrSize = unsafe.Sizeof(ValuePtr{})
 
-// 判断两个ValuePtr的大小，如果 p < o，返回true
+// 判断两个ValuePtr的新旧，如果 p < o，返回true
 func (p ValuePtr) Less(o *ValuePtr) bool {
 	if o == nil {
 		return false
 	}
+	// fid大的vp更新
 	if p.Fid != o.Fid {
 		return p.Fid < o.Fid
 	}
+	// offset大的vp更新
 	if p.Offset != o.Offset {
 		return p.Offset < o.Offset
 	}
+	// len大的vp更新
 	return p.Len < o.Len
 }
 

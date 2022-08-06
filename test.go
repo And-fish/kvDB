@@ -1,8 +1,23 @@
-package main
+// package main
 
-import "fmt"
+// import (
+// 	"bytes"
+// 	"fmt"
+// 	"io"
+// )
 
-func main() {
-	b := []byte("撒回复i该发生的后i阿黄孵化四345678")
-	fmt.Printf("b: %v\n", len(b))
-}
+// type h struct {
+// 	ids []uint32
+// }
+
+// func main() {
+// 	var buf bytes.Buffer
+// 	buf.Write([]byte("helllo"))
+
+// 	data := buf.Bytes()
+// 	buf2, err := buf.ReadByte()
+// 	fmt.Println(err == io.EOF)
+// 	fmt.Println(buf2)
+// 	fmt.Println(data)
+
+// }

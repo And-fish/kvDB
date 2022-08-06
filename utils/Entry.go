@@ -108,3 +108,76 @@ func (e *Entry) EntryEncodedSize() uint32 {
 	ttlSize += GetIntSize(uint64(e.Meta))
 	return uint32(valueSize) + uint32(ttlSize)
 }
+
+// 预估大小，用于判断是否 存在/应该放在 于Vlog中，(不考虑checksum等元信息的大小)
+func (e *Entry) EstimateSize(threshold int) int {
+	if len(e.Value) < threshold {
+		return len(e.Key) + len(e.Value) + 1 //
+	}
+	return len(e.Key) + 12 + 1 // key + valuePtr + mate
+}
+
+// 如果value要放到value中，需要在sst中添加的是header而不是value本身
+type Header struct {
+	KLen uint32
+	VLen uint32
+	TTL  uint64
+	Meta byte
+}
+
+// 将header编码到buf中，并返回编码长度
+/*
+	HeaderBuf ：0 --> last
+	+--------------------------+
+	| meta | KLen | VLen | TTL |
+	+--------------------------+
+*/
+func (h Header) Encode(buf []byte) int {
+	buf[0] = h.Meta
+	index := 1
+	index += binary.PutUvarint(buf[index:], uint64(h.KLen))
+	index += binary.PutUvarint(buf[index:], uint64(h.VLen))
+	index += binary.PutUvarint(buf[index:], h.TTL)
+	return index
+}
+
+// 对buf解码为Header
+func (h Header) Decoder(buf []byte) int {
+	h.Meta = buf[0]
+	index := 1
+	klen, count := binary.Uvarint(buf[index:])
+	index += count
+	vlen, count := binary.Uvarint(buf[index:])
+	index += count
+	ttl, count := binary.Uvarint(buf[index:])
+	index += count
+
+	h.KLen = uint32(klen)
+	h.VLen = uint32(vlen)
+	h.TTL = ttl
+	return index
+}
+
+// 对HashReader reader解码为header
+func (h Header) DecodeFrom(reader *HashReader) (int, error) {
+	var err error
+	h.Meta, err = reader.ReadByte() // 第一个byte是meta
+	if err != nil {
+		return 0, err
+	}
+	klen, err := binary.ReadUvarint(reader) // 读一个uint64
+	if err != nil {
+		return 0, err
+	}
+	vlen, err := binary.ReadUvarint(reader)
+	if err != nil {
+		return 0, err
+	}
+	h.TTL, err = binary.ReadUvarint(reader)
+	if err != nil {
+		return 0, err
+	}
+	h.KLen = uint32(klen)
+	h.VLen = uint32(vlen)
+	return reader.BytesRead, nil
+}

@@ -80,6 +80,11 @@ func FileNameSSTable(dir string, id uint64) string {
 	return filepath.Join(dir, fmt.Sprintf("%05d.sst", id))
 }
 
+// 获取vlog文件名
+func VlogFilePath(dirPath string, fid uint32) string {
+	return fmt.Sprintf("%s%s%05d.vlog", dirPath, string(os.PathSeparator), fid)
+}
+
 // 获取当前WorkDir下面的所有sstable ID
 func LoadIDMap(dir string) map[uint64]struct{} {
 	fileInfo, err := ioutil.ReadDir(dir)

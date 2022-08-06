@@ -36,7 +36,7 @@ func (hr *HashReader) Read(buf []byte) (int, error) {
 		return n, err
 	}
 	hr.BytesRead += n
-	return n, err
+	return hr.H.Write(buf[:n])
 }
 
 // 实现ByteRaeder接口

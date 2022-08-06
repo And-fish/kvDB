@@ -36,8 +36,8 @@ const (
 
 // meta
 const (
-	BitDelete       byte = 1 << 0 // Set if the key has been deleted.
-	BitValuePointer byte = 1 << 1 // Set if the value is NOT stored directly next to key.
+	BitDelete       byte = 1 << 0 //  01 Set if the key has been deleted.
+	BitValuePointer byte = 1 << 1 //  10 Set if the value is NOT stored directly next to key.
 )
 
 // codec

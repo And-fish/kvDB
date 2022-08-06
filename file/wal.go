@@ -139,7 +139,7 @@ func (sr *SafeRead) MakeEntry(reader io.Reader) (*utils.Entry, error) {
 		return nil, err
 	}
 	crc := utils.Bytes2Uint32(crcBuf[:])
-	if crc != hr.Sum32() {
+	if crc != hr.Sum32() { // 校验
 		return nil, utils.ErrTruncate
 	}
 

@@ -38,7 +38,7 @@ func TestBase(t *testing.T) {
 		baseTest(t, lsm, 128)
 	}
 	// 运行N次测试多个sst的影响
-	runTest(1, test)
+	runTest(100, test)
 }
 
 // TestClose 测试优雅关闭
