@@ -139,16 +139,17 @@ func IsDeletedOrExpired(meta byte, expiresAt uint64) bool {
 	return expiresAt <= uint64(time.Now().Unix())
 }
 
-func DiscardEntry(e, vs *Entry) bool {
+// 判断是否应该在vlog中GC掉
+func DiscardEntry(entry *Entry) bool {
 	// TODO 版本这个信息应该被弱化掉 在后面上MVCC或者多版本查询的时候再考虑
 	// if vs.Version != ParseTs(e.Key) {
 	// 	// Version not found. Discard.
 	// 	return true
 	// }
-	if IsDeletedOrExpired(vs.Meta, vs.TTL) {
+	if IsDeletedOrExpired(entry.Meta, entry.TTL) {
 		return true
 	}
-	if (vs.Meta & BitValuePointer) == 0 {
+	if (entry.Meta & BitValuePointer) == 0 {
 		// Key also stores the value in LSM. Discard.
 		return true
 	}

@@ -11,12 +11,14 @@ import (
 	"kvdb/file"
 	"kvdb/utils"
 	"math"
+	"math/rand"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pkg/errors"
 )
@@ -44,7 +46,7 @@ type valueLog struct {
 
 type lfDiscardStats struct {
 	sync.RWMutex
-	m                 map[uint32]int64
+	m                 map[uint32]int64 // fid | 脏key数量
 	flushCh           chan map[uint32]int64
 	closer            *utils.Closer
 	updatesSinceFlush int
@@ -61,6 +63,17 @@ type safeRead struct {
 // 获取到写入的offset
 func (vlog *valueLog) getWriteOffset() uint32 {
 	return atomic.LoadUint32(&vlog.writableLogOffset)
+}
+
+// 删除LogFile
+func (vlog *valueLog) deleteLogFile(lf *file.LogFile) error {
+	if lf == nil {
+		return nil
+	}
+	lf.Lock.Lock()
+	defer lf.Lock.Unlock()
+	utils.Err(lf.Close())
+	return os.Remove(lf.FileName())
 }
 
 // 将reader中的数据转化为entry (decodeHeader报EOF，解析entry报utils.ErrTruncate)
@@ -100,7 +113,7 @@ func (sr *safeRead) MakeEntry(reader io.Reader) (*utils.Entry, error) {
 
 	var crcBuf [crc32.Size]byte
 	if _, err := io.ReadFull(hr, crcBuf[:]); err != nil {
-		if err != io.EOF {
+		if err == io.EOF {
 			err = utils.ErrTruncate
 		}
 		return nil, err
@@ -183,7 +196,7 @@ func (vlog *valueLog) flushDiscardStats() {
 		return encodeDs, nil
 	}
 
-	// 这个函数会执行merge过程
+	// 这个函数会将merge后的状态信息作为内部key写入到LSM中
 	process := func(stats map[uint32]int64) error {
 		encodeDs, err := mergeStatsFunc(stats) // 这里调用会获取到json形式的discard数据
 		if err != nil || encodeDs == nil {
@@ -212,6 +225,7 @@ func (vlog *valueLog) flushDiscardStats() {
 			if err := process(stats); err != nil {
 				utils.Err(fmt.Errorf("unable to process discardstats with error: %s", err))
 			}
+			// 如果在收到close之前会阻塞在接受flushCh，收到flushCh会重复循环监听
 		}
 	}
 }
@@ -258,12 +272,13 @@ func (vlog *valueLog) initFilesMap() error {
 func (vlog *valueLog) createVlogFile(fid uint32) (*file.LogFile, error) {
 	path := vlog.filePath(fid)
 
+	// 应该可以直接取出，待测试
 	lf := &file.LogFile{
 		FID:  fid,
 		Lock: sync.RWMutex{},
 	}
 	var err error
-	// 打开
+	// 创建文件
 	utils.Panic2(nil, lf.Open(&file.Options{
 		FID:      uint64(fid),
 		FileName: path,
@@ -292,13 +307,14 @@ func (vlog *valueLog) createVlogFile(fid uint32) (*file.LogFile, error) {
 	vlog.filesLock.Lock()
 	vlog.filesMap[fid] = lf
 	vlog.maxFid = fid
+	// 新文件的writeOffset == 0
 	atomic.StoreUint32(&vlog.writableLogOffset, utils.VlogHeaderSize)
 	vlog.numEntriesWritten = 0
 	vlog.filesLock.Unlock()
 	return lf, nil
 }
 
-// 获取fids数组
+// 获取可用的fids数组并按照fid从小到大排序
 func (vlog *valueLog) sortedFids() []uint32 {
 	toBeDeleted := make(map[uint32]struct{})
 	for _, fid := range vlog.filesToBeDeleted {
@@ -306,7 +322,7 @@ func (vlog *valueLog) sortedFids() []uint32 {
 	}
 	res := make([]uint32, 0, len(vlog.filesMap))
 	for fid := range vlog.filesMap {
-		if _, ok := toBeDeleted[fid]; !ok {
+		if _, ok := toBeDeleted[fid]; !ok { // 过滤掉正在被删除的文件
 			res = append(res, fid)
 		}
 	}
@@ -335,7 +351,7 @@ func (db *DB) updateHead(vps []*utils.ValuePtr) {
 	db.vptrHead = vp
 }
 
-// reset函数，将entry的key 和 vp表示的value重写到LSM中
+// 重放函数，将entry的key 和 vp表示的value重写到LSM中
 func (db *DB) replayFunction() func(*utils.Entry, *utils.ValuePtr) error {
 	// 这个函数会向LSM中插入kv
 	setLSM := func(key []byte, vs utils.ValueStruct) {
@@ -432,7 +448,7 @@ func (vlog *valueLog) replayLog(lf *file.LogFile, offset uint32, repalyFn utils.
 	if err != nil {
 		return errors.Wrapf(err, "Unable to replay logfile:[%s]", lf.FileName())
 	}
-	if int64(endOffset) == int64(lf.Size()) {
+	if int64(endOffset) == int64(lf.Size()) { // 如果文件执行到了尾部，返回
 		return nil
 	}
 
@@ -441,6 +457,7 @@ func (vlog *valueLog) replayLog(lf *file.LogFile, offset uint32, repalyFn utils.
 		if lf.FID != vlog.maxFid {
 			return utils.ErrDeleteVlogFile
 		}
+		// return lf.Seccess()
 		return nil
 	}
 	// fmt.Printf("Truncating vlog file %s to offset: %d\n", lf.FileName(), endOffset)
@@ -451,7 +468,7 @@ func (vlog *valueLog) replayLog(lf *file.LogFile, offset uint32, repalyFn utils.
 	return nil
 }
 
-// 打开
+// 重放，从vp开始将vlog文件加载到LSM中
 func (vlog *valueLog) open(db *DB, p *utils.ValuePtr, replayFn utils.LogEntry) error {
 	vlog.lfDiscardStats.closer.Add(1)
 	go vlog.flushDiscardStats() // 启动一个协程去处理可能需要flush的discard数据
@@ -471,7 +488,8 @@ func (vlog *valueLog) open(db *DB, p *utils.ValuePtr, replayFn utils.LogEntry) e
 		lf, ok := vlog.filesMap[fid]
 		utils.CondPanic(!ok, fmt.Errorf("vlog.filesMap[fid] fid not found"))
 		var err error
-		if err = lf.Open(&file.Options{ // 打开vlog文件，加载vlog中的数据到内存中
+		if err = lf.Open(&file.Options{ // 打开vlog文件，加载vlog中的数据到内存中，
+			// 待修改(0号vlog被初始化了两次)
 			FID:      uint64(fid),
 			FileName: vlog.filePath(fid),
 			Dir:      vlog.dirPath,
@@ -480,6 +498,7 @@ func (vlog *valueLog) open(db *DB, p *utils.ValuePtr, replayFn utils.LogEntry) e
 		}); err != nil {
 			return errors.Wrapf(err, "Open existing file: %q", lf.FileName())
 		}
+
 		var offset uint32
 		if fid == p.Fid { // 如果当前vlog和dbHead一样，就会从head后面开始
 			offset = p.Offset + p.Len
@@ -503,6 +522,27 @@ func (vlog *valueLog) open(db *DB, p *utils.ValuePtr, replayFn utils.LogEntry) e
 		}
 		// fmt.Printf("Replay took: %s\n", time.Since(now))
 
+		// 只有head之后的才需要重放？可能可以这样实现
+		// var offset uint32
+		// if fid >= p.Fid {
+		// 	offset = p.Offset + p.Len
+		// 	if err := vlog.replayLog(lf, offset, replayFn); err != nil {
+		// 		if err == utils.ErrDeleteVlogFile {
+		// 			delete(vlog.filesMap, fid)
+		// 			if err := lf.Close(); err != nil {
+		// 				return errors.Wrapf(err, "failed to close vlog file %s", lf.FileName())
+		// 			}
+		// 			path := vlog.filePath(lf.FID)
+		// 			if err := os.Remove(path); err != nil {
+		// 				return errors.Wrapf(err, "failed to delete empty value log file: %q", path)
+		// 			}
+		// 			continue
+		// 		}
+		// 		return err
+		// 	}
+		// }
+
+		// Init()是一个扩展方向，比如预加载一些数据
 		if fid < vlog.maxFid { // 如果本次处理的logfile不是最新的logfile，会重载一次size
 			if err := lf.Init(); err != nil {
 				return err
@@ -510,10 +550,10 @@ func (vlog *valueLog) open(db *DB, p *utils.ValuePtr, replayFn utils.LogEntry) e
 		}
 	}
 
-	// 到这，获取到最后一个vlog
+	// 到这，获取到最后一个vlog，也就是活跃的file
 	last, ok := vlog.filesMap[vlog.maxFid]
 	utils.CondPanic(!ok, errors.New("vlog.filesMap[vlog.maxFid] not found"))
-	lastOffset, err := last.Seek(0, io.SeekEnd)
+	lastOffset, err := last.Seek(0, io.SeekEnd) // offset是最后一个文件的尾部+0
 	if err != nil {
 		return errors.Wrapf(err, fmt.Sprintf("file.Seek to end path:[%s]", last.FileName()))
 	}
@@ -524,24 +564,26 @@ func (vlog *valueLog) open(db *DB, p *utils.ValuePtr, replayFn utils.LogEntry) e
 		Fid:    vlog.maxFid,
 		Offset: uint32(lastOffset),
 	}
+	// 获取一下过期数据
 	if err := vlog.getDiscardStats(); err != nil {
 		fmt.Errorf("Failed to populate discard stats: %s\n", err)
 	}
 	return nil
 }
 
+// 重放机制会从head所在的位置开始
 func (db *DB) getHead() (*utils.ValuePtr, uint64) {
 	var vptr utils.ValuePtr
 	return &vptr, 0
 }
 
-// initVLog
+// initVLog，vlog的入口函数
 func (db *DB) initVLog() {
-	vptr, _ := db.getHead()
+	vptr, _ := db.getHead() // head作为一个重放的checkPoint存在
 	vlog := &valueLog{
 		dirPath:          db.opt.WorkDir,
 		filesToBeDeleted: make([]uint32, 0),
-		lfDiscardStats: &lfDiscardStats{
+		lfDiscardStats: &lfDiscardStats{ // 过期vlog状态
 			m:       make(map[uint32]int64),
 			flushCh: make(chan map[uint32]int64, 16),
 			closer:  utils.NewCloser(),
@@ -550,7 +592,8 @@ func (db *DB) initVLog() {
 
 	vlog.db = db
 	vlog.opt = *db.opt
-	vlog.garbageCh = make(chan struct{}, 1)
+	vlog.garbageCh = make(chan struct{}, 1) // GC锁，保证只有一个协程在处理gc
+	// 重放机制，保证vlog文件和LSM的一致性
 	if err := vlog.open(db, vptr, db.replayFunction()); err != nil {
 		utils.Panic(err)
 	}
@@ -605,15 +648,14 @@ func (vlog *valueLog) read(vp *utils.ValuePtr) ([]byte, func(), error) {
 	if err != nil {
 		return nil, unlockCallBack, err
 	}
-
 	if vlog.opt.VerifyValueChecksum {
 		hash := crc32.New(utils.CastagnoliCrcTable)
 		if _, err := hash.Write(buf[:len(buf)-crc32.Size]); err != nil {
 			utils.RunCallback(unlockCallBack)
 			return nil, nil, errors.Wrapf(err, "failed to write hash for vp %+v", vp)
 		}
-		checksum := utils.Bytes2Uint32(buf[len(buf)-crc32.Size:])
-		if hash.Sum32() != checksum {
+		checksum := buf[len(buf)-crc32.Size:]
+		if hash.Sum32() != utils.Bytes2Uint32(checksum) {
 			utils.RunCallback(unlockCallBack)
 			return nil, nil, errors.Wrapf(utils.ErrChecksumMismatch, "value corrupted for vp: %+v", vp)
 		}
@@ -641,7 +683,7 @@ func (vlog *valueLog) validateWrites(reqs []*request) error {
 			return errors.Errorf("Request size offset %d is bigger than maximum offset %d",
 				vlogOffset, utils.MaxVlogFileSize)
 		}
-		if vlogOffset >= uint64(vlog.opt.ValueLogFileSize) { //  1<<20 < vlogOffset < maxuiny32会尝试重新写入到新的vlog
+		if vlogOffset >= uint64(vlog.opt.ValueLogFileSize) { //  1<<20 < vlogOffset < maxuiny32会将下一个写入到新的vlog
 			wOffset = 0
 			continue
 		}
@@ -714,7 +756,7 @@ func (vlog *valueLog) write(reqs []*request) error {
 			}
 			var vp utils.ValuePtr
 			vp.Fid = lf.FID
-			vp.Offset = vlog.getWriteOffset() + uint32(buf.Len()) // 此时buf.Len应该为0
+			vp.Offset = vlog.getWriteOffset() + uint32(buf.Len()) // 第一次buf.Len应该为0
 			plen, err := lf.EncodeEntry(entry, &buf, vp.Offset)   // 将entry编码到buf中
 			if err != nil {
 				return err
@@ -735,7 +777,7 @@ func (vlog *valueLog) write(reqs []*request) error {
 			vlog.getWriteOffset()+uint32(buf.Len()) > uint32(vlog.opt.ValueLogFileSize) ||
 				vlog.numEntriesWritten > uint32(vlog.opt.ValueLogMaxEntries)
 		if writeNow {
-			if err := toDisk(); err != nil { // 每个request都要sync (以request为单位)
+			if err := toDisk(); err != nil { //
 				return err
 			}
 		}
@@ -764,4 +806,326 @@ func (vlog *valueLog) close() error {
 		lf.Lock.Unlock()
 	}
 	return err
+}
+
+// sampler采样器
+type sampler struct {
+	lf            *file.LogFile
+	sizeRatio     float64
+	countRatio    float64
+	fromBeginning bool
+}
+
+type reason struct {
+	total   float64
+	discard float64
+	count   int
+}
+
+func (vlog *valueLog) sample(s *sampler, discardRatio float64) (*reason, error) {
+	sizeP := s.sizeRatio
+	countP := s.countRatio
+	fileSize := s.lf.Size()
+
+	sizeN := sizeP * float64(fileSize)
+	SizeM := sizeN / (1 << 20) // 多少MB
+	countN := int(countP * float64(vlog.opt.ValueLogMaxEntries))
+
+	var skipFirstM float64
+	var err error
+	// 如果fromBeginning == false，会随机采样其实地址
+	if !s.fromBeginning {
+		skipFirstM = float64(rand.Int63n(fileSize))
+		skipFirstM -= sizeN
+		skipFirstM /= (1 << 20)
+	}
+	var skipped float64
+
+	var r reason
+	start := time.Now()
+	var numIterations int
+	// 用于iterate()的处理函数
+	fn := func(entry *utils.Entry, vp *utils.ValuePtr) error {
+		numIterations++ // 迭代次数 +1
+		entrySz := float64(vp.Len) / (1 << 20)
+		if skipped < skipFirstM { // 如果还没有到(随机的)跳转位置，就会return取消对本次entry的处理
+			skipped += entrySz
+			return nil
+		}
+		if r.count > countN { // 如果超过了计数阈值，会stop
+			return utils.ErrStop
+		}
+		if r.total > SizeM { // 如果超过了大小阈值，会stop
+			return utils.ErrStop
+		}
+		if time.Since(start) > 10*time.Second { // 如果时间超过了十秒，会stop
+			return utils.ErrStop
+		}
+
+		r.total += entrySz // ADD size窗口
+		r.count += 1       // ADD count窗口
+		// entry, err := vlog.db.Get(entry.Key) // 获取到entry
+		if err != nil {
+			return err
+		}
+		if utils.DiscardEntry(entry) {
+			r.discard += entrySz
+			return nil
+		}
+		utils.CondPanic(len(entry.Value) <= 0, fmt.Errorf("len(entry.Value) <= 0"))
+		vp.Decode(entry.Value)
+		if vp.Fid > s.lf.FID {
+			r.discard += entrySz
+			return nil
+		}
+		if vp.Offset > entry.Offset {
+			r.discard += entrySz
+			return nil
+		}
+		return nil
+	}
+	// 对lf中所有的entry都执行fn
+	_, err = vlog.iterate(s.lf, 0, fn)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("Fid: %d. Skipped: %5.2fMB Num iterations: %d. Data status=%+v\n", s.lf.FID, skipped, numIterations, r)
+
+	// 如果count没有到达阈值，且总大小小于size窗口的75%，则认为采样失败，不考虑本次采样的结果
+	// 或者discard数量小于窗口的（discard容忍度），也会认为采样失败
+	if (r.count < countN && r.total < SizeM*0.75) || r.discard < discardRatio*r.total {
+		fmt.Printf("Skipping GC on fid: %d", s.lf.FID)
+		return nil, utils.ErrNoRewrite
+	}
+	return &r, nil
+}
+
+// /////// GC
+// 找到需要gc的vlog文件
+func (vlog *valueLog) pickLog(head *utils.ValuePtr) []*file.LogFile {
+	vlog.filesLock.RLock()
+	defer vlog.filesLock.RUnlock()
+
+	files := make([]*file.LogFile, 0)
+	fids := vlog.sortedFids() // 拿到所有的fids
+	switch {
+	case len(fids) <= 1:
+		return nil
+	}
+
+	// 候选log
+	candidate := struct {
+		fid     uint32
+		discard int64
+	}{math.MaxUint32, 0}
+
+	vlog.lfDiscardStats.RLock()
+	// 遍历fids找到一个小于等于head的 && discard数量最大的logFile
+	for _, fid := range fids {
+		if fid >= head.Fid {
+			break
+		}
+		if vlog.lfDiscardStats.m[fid] > candidate.discard {
+			candidate.fid = fid
+			candidate.discard = vlog.lfDiscardStats.m[fid]
+		}
+	}
+	vlog.lfDiscardStats.RUnlock()
+
+	// 如果找到某个合法的candidate，将待清理的logfile append进去
+	if candidate.fid != math.MaxUint32 {
+		files = append(files, vlog.filesMap[candidate.fid])
+	}
+
+	// 再补充一个随机的fid作为GC对象，防止统计discard不充分的情况，保证files中存在对象
+	var idxHead int
+	for i, fid := range fids {
+		if fid == head.Fid {
+			idxHead = i
+			break
+		}
+	}
+	if idxHead == 0 {
+		idxHead = 1
+	}
+	idx := rand.Intn(idxHead)
+	if idx > 0 {
+		idx = rand.Intn(idx - 1)
+	}
+	files = append(files, vlog.filesMap[fids[idx]])
+	return files
+}
+
+func (vlog *valueLog) iteratorCount() int {
+	return int(atomic.LoadInt32(&vlog.numActiveIterators))
+}
+
+// 重写操作，只负责vlog的重写
+func (vlog *valueLog) rewrite(lf *file.LogFile) error {
+	vlog.filesLock.RLock()
+	maxfid := vlog.maxFid
+	vlog.filesLock.RUnlock()
+	utils.CondPanic(uint32(lf.FID) >= maxfid, fmt.Errorf("fid to move: %d. Current max fid: %d", lf.FID, maxfid))
+
+	es := make([]*utils.Entry, 0, 1000)
+	var size int64
+	var count, moved int
+	fn := func(entry *utils.Entry) error {
+		count++
+		if count%100000 == 0 {
+			fmt.Printf("Processing entry %d\n", count)
+		}
+		lsmEntry, err := vlog.db.lsm.Get(entry.Key) // 获取到sst文件中的entry
+		if err != nil {
+			return err
+		}
+		if utils.DiscardEntry(lsmEntry) { // 如果过期了就不用重写
+			return nil
+		}
+		if len(lsmEntry.Value) == 0 {
+			return errors.Errorf("Empty value: %+v", lsmEntry)
+		}
+		var vp utils.ValuePtr
+		vp.Decode(lsmEntry.Value) // 解析sst中entry的value为vp
+
+		if vp.Fid > lf.FID {
+			return nil
+		}
+		if vp.Offset > entry.Offset { // 如果sst中entry记录的offset超过了lf中解析出来的的offset，跳过
+			return nil
+		}
+		if vp.Fid == lf.FID && vp.Offset == entry.Offset {
+			// 如果读取到的entry相同
+			moved++
+			ne := new(utils.Entry)
+			ne.Meta = 0
+			ne.TTL = entry.TTL
+			ne.Key = append([]byte{}, entry.Key...)
+			ne.Value = append([]byte{}, entry.Value...) // newEntry的Value是从vlog解析出来的实际的value
+			sz := int64(ne.EstimateSize(vlog.db.opt.ValueLogFileSize))
+			sz += int64(len(entry.Value))
+
+			if int64(len(es)+1) >= vlog.opt.MaxBatchCount || size+sz >= NewDefaultOptions().MaxBatchSize {
+				if err := vlog.db.batchSet(es); err != nil {
+					return err
+				}
+				size = 0
+				es = es[:0]
+			}
+			es = append(es, ne)
+			size += sz
+		}
+		return nil
+	}
+
+	_, err := vlog.iterate(lf, 0, func(entry *utils.Entry, vp *utils.ValuePtr) error {
+		return fn(entry)
+	})
+
+	if err != nil {
+		return err
+	}
+	// 处理es中剩下的数据
+	batchSize := 1024
+	var loops int
+	for i := 0; i < len(es); {
+		loops++
+		if batchSize == 0 {
+			return utils.ErrNoRewrite
+		}
+		end := i + batchSize
+		if end > len(es) {
+			end = len(es)
+		}
+		if err := vlog.db.batchSet(es[i:end]); err != nil {
+			if err == utils.ErrTxnTooBig {
+				batchSize /= 2
+				continue
+			}
+			return err
+		}
+		i += batchSize
+	}
+
+	var deleteFileNow bool
+
+	{
+		vlog.filesLock.Lock()
+		if _, ok := vlog.filesMap[lf.FID]; !ok {
+			vlog.filesLock.Unlock()
+			return errors.Errorf("Unable to find fid: %d", lf.FID)
+		}
+		if vlog.iteratorCount() == 0 {
+			// fmt.Println(lf.FID)
+			// delete(vlog.filesMap, lf.FID)
+			// deleteFileNow = true
+		} else {
+			vlog.filesToBeDeleted = append(vlog.filesToBeDeleted, lf.FID)
+		}
+		vlog.filesLock.Unlock()
+	}
+
+	if deleteFileNow {
+		if err := vlog.deleteLogFile(lf); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// 执行GC操作
+func (vlog *valueLog) doRunGc(lf *file.LogFile, discardRatio float64) (err error) {
+	defer func() {
+		// 退出时需要移除掉本次的数据
+		if err == nil {
+			vlog.lfDiscardStats.Lock()
+			delete(vlog.lfDiscardStats.m, lf.FID)
+			vlog.lfDiscardStats.Unlock()
+		}
+	}()
+
+	s := &sampler{
+		lf:            lf,
+		countRatio:    0.01, // 采样窗口为1%的ValueLogMaxEntries
+		sizeRatio:     0.1,  // 采样窗口为10%总size
+		fromBeginning: false,
+	}
+	if _, err = vlog.sample(s, discardRatio); err != nil {
+		return err
+	}
+	if err = vlog.rewrite(lf); err != nil {
+		return err
+	}
+	return nil
+}
+
+// run_GC
+func (vlog *valueLog) runGC(discardRatio float64, head *utils.ValuePtr) error {
+	select {
+	case vlog.garbageCh <- struct{}{}:
+		defer func() {
+			// 一次只能同时运行一个GC
+			<-vlog.garbageCh
+		}()
+
+		var err error
+		files := vlog.pickLog(head)
+		if len(files) == 0 {
+			return utils.ErrNoRewrite
+		}
+
+		tried := make(map[uint32]bool)
+		for _, lf := range files {
+			if _, ok := tried[lf.FID]; ok {
+				continue
+			}
+			tried[lf.FID] = true
+			if err = vlog.doRunGc(lf, discardRatio); err == nil {
+				return nil
+			}
+		}
+		return err
+	default:
+		return utils.ErrRejected
+	}
 }

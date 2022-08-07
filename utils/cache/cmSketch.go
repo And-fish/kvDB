@@ -43,7 +43,7 @@ func (r cmRow) incrRow(n uint64) {
 	// count被设置位最高15，所以只会对count<15的时候自增计数
 	if count < 15 {
 		// 例如 r[byteIndex] == 1101 1001，需要对高4位自增，1101 1001 + 1 0000 =1110 0000，0b1110 = 0b1101 + 1
-		r[byteIndex] += 1 << byteIndex
+		r[byteIndex] += 1 << bitIndex
 	}
 }
 

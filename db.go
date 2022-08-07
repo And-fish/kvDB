@@ -8,9 +8,12 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pkg/errors"
 )
+
+var head = []byte("AND_FISH")
 
 type KvAPI interface {
 	Set(data *utils.Entry) error
@@ -46,6 +49,7 @@ func Open(opt *Options) *DB {
 	db := &DB{
 		opt: opt,
 	}
+	// 初始化vlog结构
 	db.initVLog()
 	db.lsm = lsmt.NewLSM(&lsmt.Options{
 		WorkDir:             opt.WorkDir,
@@ -60,7 +64,7 @@ func Open(opt *Options) *DB {
 		NumLevelZeroTables:  15,
 		MaxLevelNum:         7,
 		NumCompactors:       1,
-		DiscardStatsCh:      &(db.vlog.lfDiscardStats.flushCh),
+		DiscardStatsCh:      &(db.vlog.lfDiscardStats.flushCh), // 将lsm的DiscardStatsCh 和 vlog.lfDiscardStats.flushCh 连接起来，这样在compact的过程中就可以将过期key数据发送给vlog
 	})
 
 	db.stats = newStats(opt)
@@ -75,6 +79,20 @@ func Open(opt *Options) *DB {
 	return db
 }
 
+func (db *DB) pushHead(ft flushTask) error {
+	if ft.vptr.IsZero() {
+		return errors.New("Head should not be zero")
+	}
+	// fmt.Printf("Storing value log head: %+v\n", ft.vptr)
+	val := ft.vptr.Encode()
+	haedTs := utils.KeyWithTS(head, uint64(time.Now().Unix()/1e9))
+	ft.memTable.Add(&utils.Entry{
+		Key:   haedTs,
+		Value: val,
+	})
+	return nil
+}
+
 // 将request写入到LSM
 func (db *DB) writeToLSM(req *request) error {
 	if len(req.Ptrs) != len(req.Entries) {
@@ -85,7 +103,7 @@ func (db *DB) writeToLSM(req *request) error {
 		if db.shouldWriteValueToLSM(entry) {
 			entry.Meta = entry.Meta &^ utils.BitValuePointer // 取消 BitValuePointer 的标记
 		} else {
-			entry.Meta = entry.Meta & utils.BitValuePointer // 保留 BitValuePointer 的标记
+			entry.Meta = entry.Meta | utils.BitValuePointer // 打上 BitValuePointer 的标记
 			entry.Value = req.Ptrs[i].Encode()              // 编码为valuePtr
 		}
 		db.lsm.Set(entry)
@@ -316,10 +334,37 @@ func (db *DB) Close() error {
 	return nil
 }
 
+// 批写入，实际上就是封装了sendToWriteCh
+func (db *DB) batchSet(entries []*utils.Entry) error {
+	req, err := db.sendToWriteCh(entries)
+	if err != nil {
+		return err
+	}
+	return req.Wait()
+}
+
 // Vlog_GC
 func (db *DB) RunValueLogGC(discardRatio float64) error {
 	if discardRatio >= 1.0 || discardRatio <= 0.0 {
 		return utils.ErrInvalidRequest
 	}
-	utils.KeyWithTS(head, math.MaxUint32)
+	headky := utils.KeyWithTS(head, math.MaxUint64)
+	val, err := db.lsm.Get(headky)
+	if err != nil {
+		if err == utils.ErrKeyNotFound {
+			val = &utils.Entry{
+				Key:   headky,
+				Value: []byte{},
+			}
+		} else {
+			return errors.Wrap(err, "Retrieving head from on-disk LSM")
+		}
+	}
+
+	var head utils.ValuePtr
+	if len(val.Value) > 0 {
+		head.Decode(val.Value)
+	}
+
+	return db.vlog.runGC(discardRatio, &head)
 }

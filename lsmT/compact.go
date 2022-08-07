@@ -254,7 +254,7 @@ func iteratorsReversed(ts []*table, opt *utils.Options) []utils.Iterator {
 	return iters
 }
 
-// 更新需要丢失的数据
+// 将需要丢失的数据传出
 func (lm *levelManager) updateDiscardStats(discardStats map[uint32]int64) {
 	select {
 	case *lm.lsm.option.DiscardStatsCh <- discardStats:
@@ -276,13 +276,13 @@ func IsDeletedOrExpired(entry *utils.Entry) bool {
 // 开始执行并行compact
 func (lm *levelManager) subcompact(itr utils.Iterator, kr keyRange, cd compactDef, va *utils.Valve, res chan<- *table) {
 	var lastKey []byte
-	discardStats := make(map[uint32]int64)
+	discardStats := make(map[uint32]int64) // 收集过期数据，fid / size
 	defer func() {
 		lm.updateDiscardStats(discardStats)
 	}()
 
 	updateStats := func(entry *utils.Entry) {
-		if entry.Meta&utils.BitValuePointer > 0 {
+		if entry.Meta&utils.BitValuePointer > 0 { // 如果被标记为ValuePtr，会添加到discardStats
 			var vp utils.ValuePtr
 			vp.Decode(entry.Value)
 			discardStats[vp.Fid] += int64(vp.Len)
@@ -309,11 +309,11 @@ func (lm *levelManager) subcompact(itr utils.Iterator, kr keyRange, cd compactDe
 			}
 
 			switch {
-			case isExpied:
+			case isExpied: // 如果已经过期了会执行check是否是ValuePtr
 				updateStats(itr.Item().Entry())
-				builder.AddStaleKey(itr.Item().Entry())
+				builder.AddStaleKey(itr.Item().Entry()) // 将过期数据记录下来
 			default:
-				builder.Addkey(itr.Item().Entry())
+				builder.Addkey(itr.Item().Entry()) // 没有过期就Add
 			}
 		}
 	}

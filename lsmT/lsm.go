@@ -128,7 +128,7 @@ func (lsm *LSM) Get(key []byte) (*utils.Entry, error) {
 	}
 	// 从后往前查，因为后面的immutable被认为是更新的
 	for i := len(lsm.immutables) - 1; i >= 0; i-- {
-		if entry, err = lsm.memtable.Get(key); entry != nil && entry.Value != nil {
+		if entry, err = lsm.immutables[i].Get(key); entry != nil && entry.Value != nil {
 			return entry, err
 		}
 	}

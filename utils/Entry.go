@@ -142,7 +142,7 @@ func (h Header) Encode(buf []byte) int {
 }
 
 // 对buf解码为Header
-func (h Header) Decoder(buf []byte) int {
+func (h *Header) Decoder(buf []byte) int {
 	h.Meta = buf[0]
 	index := 1
 	klen, count := binary.Uvarint(buf[index:])
@@ -159,7 +159,7 @@ func (h Header) Decoder(buf []byte) int {
 }
 
 // 对HashReader reader解码为header
-func (h Header) DecodeFrom(reader *HashReader) (int, error) {
+func (h *Header) DecodeFrom(reader *HashReader) (int, error) {
 	var err error
 	h.Meta, err = reader.ReadByte() // 第一个byte是meta
 	if err != nil {
