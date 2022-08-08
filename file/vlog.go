@@ -162,9 +162,11 @@ func (lf *LogFile) EncodeEntry(entry *utils.Entry, buf *bytes.Buffer, offset uin
 	// multiWrter.Write会将buf写入到 multiWrter中所有的Wrter
 	utils.Panic2(writers.Write(headerEnc[:encSize])) // 向writes中写入数据enc编码
 	utils.Panic2(writers.Write(entry.Key))           // 写入key
-	utils.Panic2(writers.Write(entry.Value))         // 写入value
+
+	utils.Panic2(writers.Write(entry.Value)) // 写入value
 
 	var crcBuf [crc32.Size]byte
+
 	binary.BigEndian.PutUint32(crcBuf[:], hash.Sum32()) // 将crc编码解析到crcBuf中
 	utils.Panic2(buf.Write(crcBuf[:]))                  // 再把crcBuf写入到buf中
 	return len(headerEnc[:encSize]) + len(entry.Key) + len(entry.Value) + len(crcBuf), nil

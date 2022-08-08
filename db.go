@@ -24,6 +24,7 @@ type KvAPI interface {
 	Close() error
 }
 
+// 对外暴露的接口对象，全局唯一，持有各种资源句柄
 type DB struct {
 	sync.RWMutex
 	opt   *Options

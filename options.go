@@ -4,12 +4,12 @@ import "kvdb/utils"
 
 // Options corekv 总的配置文件
 type Options struct {
-	ValueThreshold      int64
-	WorkDir             string
-	MemTableSize        int64
-	SSTableMaxSz        int64
-	MaxBatchCount       int64
-	MaxBatchSize        int64 // max batch size in bytes
+	ValueThreshold      int64  // KV分离的阈值
+	WorkDir             string // 数据库文件的保存目录
+	MemTableSize        int64  // 内存MemTable的大小上限
+	SSTableMaxSz        int64  // SST文件的大小上限
+	MaxBatchCount       int64  // 批处理的最大处理次数
+	MaxBatchSize        int64  // 批处理的最大处理大小
 	ValueLogFileSize    int
 	VerifyValueChecksum bool
 	ValueLogMaxEntries  uint32

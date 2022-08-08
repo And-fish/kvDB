@@ -103,6 +103,9 @@ func (lh *levelHandler) Sort() {
 
 // 根据key获取levelHandler中所在的table	(L0层不可用)
 func (lh *levelHandler) getTable(key []byte) *table {
+	if len(lh.tables) > 0 && (bytes.Compare(key, lh.tables[0].sst.GetMinKey()) < 0 || bytes.Compare(key, lh.tables[len(lh.tables)-1].sst.GetMaxKey()) > 0) {
+		return nil
+	}
 	for i := len(lh.tables) - 1; i >= 0; i-- {
 		// 每个table都会记录各自的minkey和maxkey，如果key在[minKey,maxKey]区间内就会返回
 		if bytes.Compare(key, lh.tables[i].sst.GetMinKey()) > -1 &&
@@ -152,8 +155,8 @@ func (lh *levelHandler) isLastLevel() bool {
 
 // 在levelHandler层面创建迭代器，也就是一个level的所有tabelItertor
 func (lh *levelHandler) iterators() []utils.Iterator {
-	lh.Lock()
-	defer lh.RLock()
+	lh.RLock()
+	defer lh.RUnlock()
 
 	opt := &utils.Options{IsAsc: true}
 	if lh.levelNum == 0 {

@@ -108,11 +108,12 @@ func (sr *safeRead) MakeEntry(reader io.Reader) (*utils.Entry, error) {
 		}
 		return nil, err
 	}
+
 	entry.Key = buf[:klen]
 	entry.Value = buf[klen:]
 
 	var crcBuf [crc32.Size]byte
-	if _, err := io.ReadFull(hr, crcBuf[:]); err != nil {
+	if _, err := io.ReadFull(reader, crcBuf[:]); err != nil {
 		if err == io.EOF {
 			err = utils.ErrTruncate
 		}
@@ -1049,21 +1050,19 @@ func (vlog *valueLog) rewrite(lf *file.LogFile) error {
 
 	var deleteFileNow bool
 
-	{
-		vlog.filesLock.Lock()
-		if _, ok := vlog.filesMap[lf.FID]; !ok {
-			vlog.filesLock.Unlock()
-			return errors.Errorf("Unable to find fid: %d", lf.FID)
-		}
-		if vlog.iteratorCount() == 0 {
-			// fmt.Println(lf.FID)
-			// delete(vlog.filesMap, lf.FID)
-			// deleteFileNow = true
-		} else {
-			vlog.filesToBeDeleted = append(vlog.filesToBeDeleted, lf.FID)
-		}
+	vlog.filesLock.Lock()
+	if _, ok := vlog.filesMap[lf.FID]; !ok {
 		vlog.filesLock.Unlock()
+		return errors.Errorf("Unable to find fid: %d", lf.FID)
 	}
+	if vlog.iteratorCount() == 0 {
+		// fmt.Println(lf.FID)
+		delete(vlog.filesMap, lf.FID)
+		// deleteFileNow = true
+	} else {
+		vlog.filesToBeDeleted = append(vlog.filesToBeDeleted, lf.FID)
+	}
+	vlog.filesLock.Unlock()
 
 	if deleteFileNow {
 		if err := vlog.deleteLogFile(lf); err != nil {

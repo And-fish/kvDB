@@ -160,6 +160,7 @@ func (h *Header) Decoder(buf []byte) int {
 
 // 对HashReader reader解码为header
 func (h *Header) DecodeFrom(reader *HashReader) (int, error) {
+
 	var err error
 	h.Meta, err = reader.ReadByte() // 第一个byte是meta
 	if err != nil {
@@ -180,4 +181,5 @@ func (h *Header) DecodeFrom(reader *HashReader) (int, error) {
 	h.KLen = uint32(klen)
 	h.VLen = uint32(vlen)
 	return reader.BytesRead, nil
+
 }
