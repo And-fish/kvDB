@@ -8,6 +8,20 @@ import (
 	"github.com/cespare/xxhash/v2"
 )
 
+/*
+	大体的策略是所有的数据都会进入到 Window-LRU 中，当WLRU满了之后会弹出链表末尾的节点W；
+	尝试将W放入到 segment-LRU 中，在segmentLRU中会首先进入到Probation中，当Probation中的数据再被访问会加入到Protected；
+	W加入到Probation中会通过 CMSketch中的计数来和 Probation的A1作比较；
+	当W试图加入到Probation时会首先经过BloomFilter来快速判断是否出现过至少一次；
+
+	一个高频key进入到SLRU之后会很快就加入到A2中，当需要从A2中淘汰，需要很多次替换，并且从SLRU A1中被淘汰还需要经过和WLRU的对比；
+	并且从SLRU中被淘汰不会删除计数信息和bloomFilter，所以还是可以很快回到缓存中；
+
+	1. 针对只访问一次的数据，在WLRU中很快就被淘汰了，不会占用缓存空间；
+	2. 针对突发性的稀疏流量。就是在短时间内频繁访问的数据，WLRU可以很好的适应这种访问模型；
+	3. 针对真正的热点数据，很快就会从WLRU中加入到Protected区，并且会经过保鲜机制一个合理的数量
+*/
+
 // WLRU中占据所有空间的多少
 const wlruPct = 1
 
@@ -57,9 +71,6 @@ func NewCache(size int) *Cache {
 
 	// 创建需要的data
 	data := make(map[uint64]*list.Element, size)
-	// fmt.Printf("wlruSize: %v\n", wlruSize)
-	// fmt.Printf("a1Size: %v\n", a1Size)
-	// fmt.Printf("a2Size: %v\n", size-a1Size-wlruSize)
 
 	return &Cache{
 		// data是共用的，创建对应大小的wlru

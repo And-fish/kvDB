@@ -24,7 +24,7 @@ type tableBuilder struct {
 	opt           *Options
 	blockList     []*block
 	keyCount      uint32
-	keyHashes     []uint32
+	keyHashes     []uint32 // 是builder中所有的key的hash值
 	maxVersion    uint64
 	basekey       []byte
 	staleDataSize int
@@ -349,7 +349,7 @@ func (tb *tableBuilder) done() buildData {
 	if tb.opt.BloomFalsePositive > 0 {
 		// 根据optine的假阳率和key的个数计算bitsperkey，并创建合适的bloomFilter
 		bitsperkey := utils.BitsPerkey(len(tb.keyHashes), tb.opt.BloomFalsePositive)
-		filter = utils.NewFilter(tb.keyHashes, bitsperkey)
+		filter = utils.NewFilter(tb.keyHashes, bitsperkey) // 将builder中所有的key都插入到filter中
 	}
 
 	// 获取blockIndex和所有block.data的大小

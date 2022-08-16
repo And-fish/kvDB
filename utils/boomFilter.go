@@ -17,6 +17,8 @@ func BitsPerkey(entriesNum int, probability float64) int {
 	locs := math.Ceil(size / float64(entriesNum))
 	return int(locs)
 }
+
+// 将keys插入到BloomFilter中
 func insertFilter(keys []uint32, bitsperkey int) []byte {
 	if bitsperkey < 0 {
 		bitsperkey = 0
@@ -36,7 +38,7 @@ func insertFilter(keys []uint32, bitsperkey int) []byte {
 	Bytes := (size + 7) / 8
 	Bits := Bytes * 8
 	filter := make([]byte, Bytes+1)
-	for _, hash := range keys {
+	for _, hash := range keys { // 将keys中每一个key(hash值)都插入到bloomFilter中
 		delta := hash>>17 | hash<<15
 		for j := uint32(0); j < k; j++ {
 			offset := hash % uint32(Bits)
@@ -52,9 +54,12 @@ func insertFilter(keys []uint32, bitsperkey int) []byte {
 	return filter
 }
 
+// 创建一个bloomFilter
 func NewFilter(keys []uint32, bitperkey int) Filter {
 	return Filter(insertFilter(keys, bitperkey))
 }
+
+// 计算hash值
 func Hash(key []byte) uint32 {
 	hash := uint32(seed) ^ uint32(len(key))*m
 	// 每次处理key的前四个byte
@@ -78,6 +83,8 @@ func Hash(key []byte) uint32 {
 	}
 	return hash
 }
+
+// 判断是否有可能存在于Bloom Filter
 func (f Filter) MayContain(hash uint32) bool {
 	if len(f) < 2 {
 		return false
@@ -101,6 +108,8 @@ func (f Filter) MayContain(hash uint32) bool {
 	}
 	return true
 }
+
+// 判断是否可能存在于Bloom Filter
 func (f Filter) MayContainKey(key []byte) bool {
 	return f.MayContain(Hash(key))
 }

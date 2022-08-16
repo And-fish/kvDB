@@ -43,6 +43,12 @@ func TestSkipListBasicCRUD(t *testing.T) {
 	assert.Equal(t, entry2_new.Value, list.Search(entry2_new.Key).Value)
 }
 
+func Benchmark_SkipListBasicCRUD1(b *testing.B) {
+	for i := 0; i < 2000; i++ {
+		Benchmark_SkipListBasicCRUD(b)
+	}
+}
+
 func Benchmark_SkipListBasicCRUD(b *testing.B) {
 	list := NewSkiplist(100000000)
 	key, val := "", ""
