@@ -54,6 +54,13 @@ func (a *Arena) putNode(height int) uint32 {
 	offset := a.allocate(uint32(allocateSize))
 	// 计算实际开始写入的偏移量
 	rwOffset := (offset + uint32(alignOffset)) &^ uint32(alignOffset) // 会使得rwOffset的是8的倍数，增加读写效率
+	// exp: startOffset == 3;
+	//  	alignOffset == 7;
+	//   	allocateSzie = 15 + 7 = 22 ;
+	//  	endOffset = 22 + 3 =25 ;
+	//  	offset = 3 ;
+	// 	rwOffset = (3 + 7) & (~ 7) == 1010 & 111...111000 == 1000 == 8 ;
+	// 	Assert( 8 + 15 < 25); True
 	return rwOffset
 }
 
@@ -62,7 +69,7 @@ func (a *Arena) getNode(offset uint32) *skiplistNode {
 	if offset == 0 {
 		return nil
 	}
-
+	// 不需要担心有多余的levels中有值，因为node中记录了level信息;
 	return (*skiplistNode)(unsafe.Pointer(&a.buf[offset])) // 重构为SkipListNode
 }
 

@@ -4,8 +4,8 @@ import afCache "kvdb/utils/cache"
 
 // LSMcache，是utils/cache的调用
 type cache struct {
-	indexs *afCache.Cache
-	blocks *afCache.Cache
+	indexs *afCache.Cache // TODO
+	blocks *afCache.Cache // block的缓存	(key: [index:fid] ,value: block)
 }
 
 type blockBuffer struct {

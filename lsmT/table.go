@@ -16,9 +16,10 @@ import (
 	"github.com/pkg/errors"
 )
 
+// table，是LSM的核心成员之一
 type table struct {
-	sst *file.SSTable
-	lm  *levelManager
+	sst *file.SSTable // 数据所在的sstable
+	lm  *levelManager // 管理层级结构
 	fid uint64
 	ref int32 // 计数
 }
@@ -43,7 +44,8 @@ func (table *table) Delete() error {
 	return table.sst.Delete()
 }
 
-// 用于set Blocks的Cache时用到的key
+// 用于set Blocks的Cache时用到的key	[index:4bytes , fid:4bytes]
+// 表示哪一个table文件的第index个block
 func (table *table) blockCacheKey(idx int) []byte {
 	utils.CondPanic(table.fid >= math.MaxUint32, fmt.Errorf("t.fid >= math.MaxUint32"))
 	utils.CondPanic(uint32(idx) >= math.MaxUint32, fmt.Errorf("uint32(idx) >=  math.MaxUint32"))
@@ -71,20 +73,22 @@ func (table *table) DecrRef() error {
 	return nil
 }
 
-// 根据levelManager创建table
+// 创建table
 func openTable(lm *levelManager, tableName string, buider *tableBuilder) *table {
 	// sstsize会尝试按照builder来定义，否则按照option来确定
-	sstSize := int(lm.opt.SSTableMaxSz)
+	var sstSize int
 	if buider != nil {
 		sstSize = int(buider.done().size)
+	} else {
+		sstSize = int(lm.opt.SSTableMaxSz)
 	}
 
 	var t *table
 	var err error
 	fid := utils.FID(tableName)
-	// 如果传入了builder，说明需要根据将buider flush到磁盘
+	// 如果传入了builder，说明需要将buider flush到磁盘
 	if buider != nil {
-		t, err = buider.flush(lm, tableName)
+		t, err = buider.flush(lm, tableName) // 同时会生成一个新的table
 		if err != nil {
 			utils.Err(err)
 			return nil
@@ -102,7 +106,9 @@ func openTable(lm *levelManager, tableName string, buider *tableBuilder) *table 
 			MaxSz:    sstSize,
 		})
 	}
+
 	t.IncrRef()
+
 	// 初始化sstable(根据的是sstable.file也就是MmapFile)
 	if err := t.sst.Init(); err != nil {
 		utils.Err(err)
@@ -120,7 +126,7 @@ func openTable(lm *levelManager, tableName string, buider *tableBuilder) *table 
 	return t
 }
 
-// 获取table的对应i的BlockOffset
+// 获取table的对应第i个BlockOffset
 func (table *table) offsets(BOffset *pb.BlockOffset, i int) bool {
 	index := table.sst.GetIndexs()
 	if i < 0 || i > len(index.GetOffsets()) {
@@ -146,6 +152,7 @@ func (table *table) block(idx int) (*block, error) {
 	if idx >= len(table.sst.GetIndexs().Offsets) {
 		return nil, errors.New("block out of index")
 	}
+
 	var b *block
 	key := table.blockCacheKey(idx)
 	// 尝试从cache中获取blcok
@@ -154,16 +161,17 @@ func (table *table) block(idx int) (*block, error) {
 		b, _ = blk.(*block)
 		return b, nil
 	}
+
 	// 如果不在block中，就要根据idx查询mmap中的block
 	var blockOffset pb.BlockOffset
-	// 如果idx合法，blokcOffset会保存对应idx的blockOffset
+	// 如果idx合法，blokcOffset会拿到对应的offset
 	utils.CondPanic(!table.offsets(&blockOffset, idx), fmt.Errorf("block t.offset id=%d", idx))
 	b = &block{
 		offset: int(blockOffset.GetOffset()),
 	}
 
 	var err error
-	// 从mmapfile中读取到block的数据
+	// 从mmapfile中根据block的起始偏移量和长度读取block
 	if b.data, err = table.read(b.offset, int(blockOffset.GetLen())); err != nil {
 		return nil, errors.Wrapf(err,
 			"failed to read from sstable: %d at offset: %d, len: %d",
@@ -177,6 +185,7 @@ func (table *table) block(idx int) (*block, error) {
 		| checksum_len | checksum | entryOffset_len | entryOffset | Key-Value |
 		+---------------------------------------------------------------------+
 	*/
+
 	readPos := len(b.data) - 4 // ckecksum_len大小为4bytes
 	b.checkLen = int(utils.Bytes2Uint32(b.data[readPos : readPos+4]))
 	if b.checkLen > len(b.data) {
@@ -209,12 +218,13 @@ func (table *table) block(idx int) (*block, error) {
 func (table *table) Search(key []byte, maxVs *uint64) (entry *utils.Entry, err error) {
 	/*
 		外 --> 内
-		+-------------------------------------------------------------------+
-		| ckecksum_len | checksum | BlockIndexs_len | BlockIndexs | BlockData |
-		+-------------------------------------------------------------------+
+		+-----------------------------------------------------------+
+		| ckecksum_len | checksum | Indexs_len | Indexs | BlockData |
+		+-----------------------------------------------------------+
 	*/
 	table.IncrRef()
 	defer table.DecrRef()
+
 	// 首先要获取整个TableIndex(BlockIndex)，在sst.Init()被加载到到sst中 	(sst.initSSTable()中被初始化)
 	index := table.sst.GetIndexs()
 	bloomFilter := utils.Filter(index.BloomFilter) // 如果有bloomFilter，也会在sst.Init()中被unmarshal到sst中

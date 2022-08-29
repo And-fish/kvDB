@@ -25,17 +25,30 @@ import (
 
 // SSTable在内存中的表现形式
 type SSTable struct {
-	lock           *sync.RWMutex
-	file           *MmapFile
-	maxKey         []byte
-	minKey         []byte
-	idxTable       *pb.TableIndex
-	hasBloomFilter bool
-	idxLen         int
-	idxStart       int
+	lock           *sync.RWMutex  // 并发控制锁
+	file           *MmapFile      // SSTable对应的数据
+	maxKey         []byte         // 最大key
+	minKey         []byte         // 最小key
+	idxTable       *pb.TableIndex // 索引，方便快速查询
+	hasBloomFilter bool           // 快速检查索引中是否含有bloomFilter
+	idxLen         int            // 索引的长度
+	idxStart       int            // 索引开始的位置
 	fid            uint64
-	createdAt      time.Time
+	createdAt      time.Time // 创建时间
 }
+
+/*
+	type TableIndex struct {
+		Offsets              []*BlockOffset `protobuf:"bytes,1,rep,name=offsets,proto3" json:"offsets,omitempty"`
+		BloomFilter          []byte         `protobuf:"bytes,2,opt,name=bloomFilter,proto3" json:"bloomFilter,omitempty"`
+		MaxVersion           uint64         `protobuf:"varint,3,opt,name=maxVersion,proto3" json:"maxVersion,omitempty"`
+		KeyCount             uint32         `protobuf:"varint,4,opt,name=keyCount,proto3" json:"keyCount,omitempty"`
+		StaleDataSize        uint32         `protobuf:"varint,5,opt,name=staleDataSize,proto3" json:"staleDataSize,omitempty"`
+		XXX_NoUnkeyedLiteral struct{}       `json:"-"`
+		XXX_unrecognized     []byte         `json:"-"`
+		XXX_sizecache        int32          `json:"-"`
+	}
+*/
 
 // 将SSTable文件读取到内存中。封装的是mmapfile的openMmapFile()
 func OpenSSTable(opt *Options) *SSTable {
@@ -56,23 +69,24 @@ func (sst *SSTable) read(offset, size int) ([]byte, error) {
 			// 如果剩下的data不足以读取需要的size，返回错误
 			return nil, io.EOF
 		}
-		return sst.file.Data[offset : offset+size], nil
+		return sst.file.Data[offset : offset+size], nil // 从
 	}
 
+	// 如果之前没有mmap映射，就使用File的Read来读取数据
 	res := make([]byte, size)
 	// 从offset开始读取size的字节到res上
-	_, err := sst.file.Fd.ReadAt(res, int64(offset))
+	_, err := sst.file.Fd.ReadAt(res, int64(offset)) // 从offset开始，读取到sieze大小的数据
 	return res, err
 }
 
-// 读取checksumOffset
+// 从offset开始读取size并检查 (简单的封装)
 func (sst *SSTable) readCheckError(offset, size int) []byte {
 	buf, err := sst.read(offset, size)
 	utils.Panic(err)
 	return buf
 }
 
-// 初始化SSTable
+// 初始化SSTable (是对sstable的索引加载,在这之前应该已经持有了sstable)
 func (sst *SSTable) initSSTable() (BOffset *pb.BlockOffset, err error) {
 	dataSize := len(sst.file.Data)
 
@@ -119,14 +133,16 @@ func (sst *SSTable) initSSTable() (BOffset *pb.BlockOffset, err error) {
 	return nil, errors.New("read index fail, offset is nil")
 }
 
-// 初始化
+// 对外暴露的sstable初始化API
 func (sst *SSTable) Init() error {
 	var BOffset *pb.BlockOffset
 	var err error
+
 	// 初始化sstable，并获取到sstable的第一个BlockOffset
 	if BOffset, err = sst.initSSTable(); err != nil {
 		return err
 	}
+
 	// 为sstable获取创建时间
 	stat, _ := sst.file.Fd.Stat()
 	statType := stat.Sys().(*syscall.Stat_t)
@@ -145,7 +161,7 @@ func (sst *SSTable) Init() error {
 	return nil
 }
 
-// 封装一下给sstable设置maxKey，也就是最后一个block的最后一个key
+// 封装一下给sstable设置maxKey
 func (sst *SSTable) SetMaxKey(maxKey []byte) {
 	sst.maxKey = maxKey
 }

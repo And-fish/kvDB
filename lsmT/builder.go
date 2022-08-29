@@ -20,13 +20,13 @@ type header struct {
 // tableBuilder用于存储构建sstable的信息
 type tableBuilder struct {
 	sstSzie       int64
-	curBlock      *block
+	curBlock      *block // 当前正在写入的Block
 	opt           *Options
-	blockList     []*block
-	keyCount      uint32
-	keyHashes     []uint32 // 是builder中所有的key的hash值
+	blockList     []*block // Builder中的Bolcks
+	keyCount      uint32   // Builder中已经有多少个key了
+	keyHashes     []uint32 // 是builder中所有的key的hash值，用于构建builder的bloomfilter
 	maxVersion    uint64
-	basekey       []byte
+	basekey       []byte // 每个Block的basekey
 	staleDataSize int
 	estimateSize  int64
 }
@@ -39,7 +39,7 @@ type block struct {
 	checkLen          int
 	data              []byte
 	baseKey           []byte
-	entryOffsets      []uint32
+	entryOffsets      []uint32 // 记录的是，每一个entry的起始
 	end               int
 	estimateSize      int64
 }
@@ -55,6 +55,7 @@ type buildData struct {
 // header的大小为4
 const headerSize = uint16(unsafe.Sizeof(header{}))
 
+// 检查Checksum
 func (b *block) verifyChecksum() error {
 	return utils.VerifyChecksum(b.data, b.checksum)
 }
@@ -82,7 +83,7 @@ func newTableBuilder(opt *Options) *tableBuilder {
 	}
 }
 
-// 根据option和指定的size初始化创建一个Builder
+// 根据指定的size初始化创建一个Builder
 func newTableBuilderWithSize(opt *Options, size int64) *tableBuilder {
 	return &tableBuilder{
 		opt:     opt,
@@ -104,9 +105,10 @@ func (tb *tableBuilder) calculateChecksum(data []byte) []byte {
 // 为可能需要的size分配足够大的空间，并返回分配的空间
 func (tb *tableBuilder) allocate(size int) []byte {
 	block := tb.curBlock
-	// 如果剩下的空间小于需要的size
+
+	// 如果剩下的空间小于需要的size，需要扩容
 	if len(block.data[block.end:]) < size {
-		// 如果扩两倍还不够就扩到需要的大小
+		// 如果扩两倍还不够，就扩到需要的大小
 		sz := 2 * len(block.data)
 		if block.end+size > sz {
 			sz = block.end + size
@@ -117,6 +119,7 @@ func (tb *tableBuilder) allocate(size int) []byte {
 		copy(buf, block.data)
 		block.data = buf
 	}
+
 	// 将记录block写入到的endOffset加上这次要写入的size
 	block.end += size
 	// 返回分配好的待写入的[]byte
@@ -137,6 +140,7 @@ func (tb *tableBuilder) finishBlock() {
 	if tb.curBlock == nil || len(tb.curBlock.entryOffsets) == 0 {
 		return
 	}
+
 	// 将entryOffset和对应的长度写到curblock.data中，因为磁盘是一维结构
 	tb.append(utils.Uint32Slice2Bytes(tb.curBlock.entryOffsets))
 	tb.append(utils.Uint32ToBytes(uint32((len(tb.curBlock.entryOffsets)))))
@@ -161,7 +165,7 @@ func (tb *tableBuilder) finishBlock() {
 	// 将tableBuilder的key计数加上entry的个数
 	tb.keyCount += uint32(len(tb.curBlock.entryOffsets))
 
-	tb.curBlock = nil
+	tb.curBlock = nil // 指向空
 	return
 }
 
@@ -171,12 +175,13 @@ func (tb *tableBuilder) tryFinishBlock(entry *utils.Entry) bool {
 	if tb.curBlock == nil {
 		return true
 	}
+
 	// 如果当前的block还没开始写入，不需要
 	if len(tb.curBlock.entryOffsets) <= 0 {
 		return false
 	}
 	// 如果condition为true，会panic
-	// 判断已经写入的entry + 待写的entry *4 + 4 + 4，是否越界了
+	// 判断已经写入的entry + 待写的entry *4 + 8 + 4，是否越界了
 	utils.CondPanic((!(uint32(len(tb.curBlock.entryOffsets)+1)*4+4+8+4 < math.MaxUint32)), errors.New("Integer overflow"))
 
 	entriesOffsetSize := int64((len(tb.curBlock.entryOffsets)+1)*4 + // entryOffset是[]uint32，加上即将存入的一个再乘4
@@ -189,7 +194,7 @@ func (tb *tableBuilder) tryFinishBlock(entry *utils.Entry) bool {
 			int64(6) + // entry的header
 			int64(len(entry.Key)) + // entry.key
 			int64(entry.EntryEncodedSize()) + // entry.meta + entry.value +entry.ttl
-			entriesOffsetSize // blcok.data之前的长度
+			entriesOffsetSize // blcok.offset的长度
 
 	utils.CondPanic(!(uint64(tb.curBlock.estimateSize)+uint64(tb.curBlock.end) < math.MaxUint32), errors.New("Integer overflow"))
 
@@ -219,10 +224,11 @@ func (tb *tableBuilder) add(entry *utils.Entry, isStable bool) {
 		Value: entry.Value,
 		TTL:   entry.TTL,
 	}
+
 	// 检查当前block是否写满了
 	if tb.tryFinishBlock(entry) {
 		if isStable {
-			tb.staleDataSize += len(key) + 4
+			tb.staleDataSize += len(key) + 4 + 4 // tableindex中构建blockoffset时
 		}
 		// 如果写满了就将前一个block封装
 		tb.finishBlock()
@@ -231,6 +237,7 @@ func (tb *tableBuilder) add(entry *utils.Entry, isStable bool) {
 			data: make([]byte, tb.opt.BlockSize),
 		}
 	}
+
 	// 向tableBuilder记录keyHash的[]uint32中添加enrt的key
 	tb.keyHashes = append(tb.keyHashes, utils.Hash(utils.ParseKey(key)))
 	// 更新最新版本号
@@ -245,11 +252,12 @@ func (tb *tableBuilder) add(entry *utils.Entry, isStable bool) {
 		tb.curBlock.baseKey = append(tb.curBlock.baseKey[:0], key...)
 		diffKey = key
 	} else {
-		// 否则就去get一下
+		// 否则就去获取到diff
 		diffKey = tb.getDiffKey(key)
 	}
 
-	// 判断相同前缀的长度是不是能用uint16表示，判断不同的部分长度能不能用uint16表示
+	// 断言相同前缀的长度是不是能用uint16表示
+	// 断言不同的部分长度能不能用uint16表示
 	utils.CondPanic(!(len(key)-len(diffKey) <= math.MaxUint16), fmt.Errorf("tableBuilder.add: len(key)-len(diffKey) <= math.MaxUint16"))
 	utils.CondPanic(!(len(diffKey) <= math.MaxUint16), fmt.Errorf("tableBuilder.add: len(diffKey) <= math.MaxUint16"))
 
@@ -278,9 +286,9 @@ func (tb *tableBuilder) add(entry *utils.Entry, isStable bool) {
 	*/
 }
 
-// 添加旧的key，和压缩merge有关
+// 记录旧的key的大小，和压缩merge有关
 func (tb *tableBuilder) AddStaleKey(e *utils.Entry) {
-	tb.staleDataSize += len(e.Key) + len(e.Value) + 4 + 4
+	tb.staleDataSize += len(e.Key) + len(e.Value) + 4 + 4 // key + value + entryOffset + header
 	tb.add(e, true)
 }
 
@@ -294,7 +302,7 @@ func (tb *tableBuilder) writeBlockOffset(b *block, startOffset uint32) *pb.Block
 	offset := &pb.BlockOffset{}
 	offset.Key = b.baseKey
 	offset.Len = uint32(b.end)
-	offset.Offset = startOffset
+	offset.Offset = startOffset // 该block在sstable中的哪一个位置
 	return offset
 }
 
@@ -326,7 +334,7 @@ func (tb *tableBuilder) buildIndex(filter []byte) ([]byte, uint32) {
 		// 将tableBuilder中所有block的数据data统计一下size
 		dataSize += uint32(tb.blockList[i].end)
 	}
-	// 将
+	// 序列化tableindex
 	data, err := tableIndex.Marshal()
 	utils.Err(err)
 	// 返回tableIndex序列化后的[]byte 和 所有block的size
@@ -337,6 +345,7 @@ func (tb *tableBuilder) buildIndex(filter []byte) ([]byte, uint32) {
 func (tb *tableBuilder) done() buildData {
 	// 结束向block写入数据，所有blcok.data此时都封装成功了EntryIndex
 	tb.finishBlock()
+
 	if len(tb.blockList) == 0 {
 		return buildData{}
 	}
@@ -352,13 +361,13 @@ func (tb *tableBuilder) done() buildData {
 		filter = utils.NewFilter(tb.keyHashes, bitsperkey) // 将builder中所有的key都插入到filter中
 	}
 
-	// 获取blockIndex和所有block.data的大小
+	// 获取tableIndex(blockindex) 和 所有block.data的大小之和
 	blockindex, dataSize := tb.buildIndex(filter)
 	// 根据索引计算checksum
 	checksum := tb.calculateChecksum(blockindex)
 	buildData.index = blockindex
 	buildData.checksum = checksum
-	// 总大小为blockData + BlcokIndex + checksum_len + blockindex_len
+	// 总大小为blockData + BlcokIndex + blockindex_len + checksum + checksum_len
 	buildData.size = int(dataSize) + len(blockindex) + 4 + 4 + len(checksum)
 	return buildData
 }
@@ -370,9 +379,9 @@ func (bd *buildData) Copy(buf []byte) (written int) {
 	}
 	/*
 		外 --> 内
-		+-------------------------------------------------------------------+
-		| ckecksum_len | checksum | BlockIndex_len | BlockIndex | BlockData |
-		+-------------------------------------------------------------------+
+		+---------------------------------------------------------+
+		| ckecksum_len | checksum | Index_len | Index | BlockData |
+		+---------------------------------------------------------+
 	*/
 	written += copy(buf[written:], bd.index)
 	written += copy(buf[written:], utils.Uint32ToBytes(uint32(len(bd.index))))
@@ -383,9 +392,9 @@ func (bd *buildData) Copy(buf []byte) (written int) {
 
 // 将tableBuilder转化为buf []byte，事先总体的封装
 func (tb *tableBuilder) finish() []byte {
-	blockData := tb.done()
-	buf := make([]byte, blockData.size)
-	written := blockData.Copy(buf)
+	buildData := tb.done()
+	buf := make([]byte, buildData.size)
+	written := buildData.Copy(buf)
 	utils.CondPanic(len(buf) == written, nil)
 	return buf
 }
@@ -399,7 +408,7 @@ func (tb *tableBuilder) finish() []byte {
 	+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 */
 
-// 将tableBuilder生成table(将数据放到mmap [] byte中)返回对应的table
+// 将tableBuilder flush到创建的table
 func (tb *tableBuilder) flush(lm *levelManager, tableName string) (*table, error) {
 	builddata := tb.done()
 	table := &table{
@@ -407,6 +416,7 @@ func (tb *tableBuilder) flush(lm *levelManager, tableName string) (*table, error
 		fid: utils.FID(tableName),
 	}
 
+	// 创建sstable
 	table.sst = file.OpenSSTable(&file.Options{
 		FileName: tableName,
 		Dir:      lm.opt.WorkDir,
@@ -418,12 +428,13 @@ func (tb *tableBuilder) flush(lm *levelManager, tableName string) (*table, error
 	// 将buildData写入到buf中，返回长度
 	written := builddata.Copy(buf)
 	utils.CondPanic((written != len(buf)), fmt.Errorf("tableBuilder.flush written != len(buf)"))
+
 	// 从sst.MmapFile.data读取一个足够大的空间
 	sstBuf, err := table.sst.Btyes(0, builddata.size)
 	if err != nil {
 		return nil, err
 	}
-	// 将BuildData写入到MmapFile中
+	// 将BuildData写入到MmapFile中	(buf中就是BuilderData的数据)
 	copy(sstBuf, buf)
 	return table, nil
 }

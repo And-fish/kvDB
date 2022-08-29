@@ -9,9 +9,9 @@ import (
 type Entry struct {
 	/*
 				Key 前  --->  后
-				+------------------------------------+
-				| realKey | timestamp(uint64,8bytes) |
-		 		+------------------------------------+
+				+---------------------------------------+
+				| realKey : uint64 | timestamp : 8bytes |
+		 		+---------------------------------------+
 	*/
 	Key   []byte
 	Value []byte
@@ -32,8 +32,16 @@ type ValueStruct struct {
 	Version uint64
 }
 
-// 计算ValueStruct中TTL的大小
+// 计算int编码需要的长度 (计算ValueStruct中TTL的大小)
 func GetIntSize(intval uint64) int {
+	/*
+		110111 11000100 10011110
+		在编码过程中会每8位(1Byte)会有一个标识位，7个数据位
+		所以1Btye有效位是7位
+		binary.PutUvarint()		按照小端编码
+		所以上面的int编码后的大小 ==> 4Byte	==> [158 137 223 1]	==> [10011110 10001001 11011111 1]
+		标识为是每个byte的最高位，如果标识位为1表示当前还没有结束
+	*/
 	size := 0
 	for {
 		size++
@@ -54,6 +62,9 @@ func (v *ValueStruct) ValEncodedSize() uint32 {
 
 // 将Value编码到传入的buf上，返回大小
 func (v *ValueStruct) ValEncoding(buf []byte) uint32 {
+	/*
+		[Meta + TTL + Value]
+	*/
 	buf[0] = v.Meta
 	ttlsize := binary.PutUvarint(buf[1:], v.TTL)
 	n := copy(buf[1+ttlsize:], v.Value)
@@ -117,7 +128,7 @@ func (e *Entry) EstimateSize(threshold int) int {
 	return len(e.Key) + 12 + 1 // key + valuePtr + mate
 }
 
-// 如果value要放到value中，需要在sst中添加的是header而不是value本身
+// 如果value要放到valuelog中，需要在sst中添加的是header而不是value本身
 type Header struct {
 	KLen uint32
 	VLen uint32

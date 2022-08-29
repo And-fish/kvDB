@@ -65,7 +65,7 @@ func IsValuePtr(e *Entry) bool {
 // 例如buf == [139,39] == [10001000,00100111]，
 // 使用binary.Uvarint(buf)可以读取到5000，0010011 10001000
 // 使用binary.BigEndian.Uint32(buf)会不考虑编码规则，按照大端读取32位，可以读取到2284257280，10001000 00100111 0000000000000000
-// 使用binary.LittleEndian.Uint32(buf)会不考虑编码规则，按照小端读取32位，可以读取到10120，0000000000000000 00100111 10001000 0000000000000000
+// 使用binary.LittleEndian.Uint32(buf)会不考虑编码规则，按照小端读取32位，可以读取到10120，0000000000000000 00100111 10001000
 func Bytes2Uint32(b []byte) uint32 {
 	return binary.BigEndian.Uint32(b)
 }

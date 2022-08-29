@@ -20,7 +20,7 @@ MREMAP_MAYMOVE:
 */
 const MREMAP_MAYMOVE = 0x1
 
-// 封装mmap，将文件映射到用户态内存中，可以直接在返回的[]byte上使用
+// 封装os.mmap，将文件映射到用户态内存中，可以直接在返回的[]byte上使用
 //
 //	void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
 func mmap(fd *os.File, writable bool, size int64) ([]byte, error) {
@@ -32,7 +32,7 @@ func mmap(fd *os.File, writable bool, size int64) ([]byte, error) {
 	return unix.Mmap(int(fd.Fd()), 0, int(size), prot, unix.MAP_SHARED)
 }
 
-// 封装mremap，重新将文件映射到一块用户态内存中，等同于 munmap + mmap
+// 封装os.mremap，重新将data映射到一块用户态内存中，等同于 munmap + mmap
 // void *mremap(void *old_address, size_t old_size,size_t new_size, int flags, ... /* void *new_address */);
 func mremap(data []byte, size int) ([]byte, error) {
 	// 将data作为通过slice重构
@@ -54,7 +54,7 @@ func mremap(data []byte, size int) ([]byte, error) {
 	return data, nil
 }
 
-// 封装munmap，用于解除映射关系
+// 封装os.munmap，用于解除映射关系
 // int munmap(void *addr, size_t length);
 func munmap(data []byte) error {
 	if len(data) == 0 || len(data) != cap(data) {
@@ -71,7 +71,7 @@ func munmap(data []byte) error {
 	return nil
 }
 
-// 封装madvise，可以用于配合mmap做一个预读操作，避免性能抖动
+// 封装os.madvise，可以用于配合mmap做一个预读操作，避免性能抖动
 // int madvise(void *addr, size_t length, int advice);
 func madvise(buf []byte, readahead bool) error {
 	// 默认参数，预读前15个页和后16个页
@@ -83,9 +83,9 @@ func madvise(buf []byte, readahead bool) error {
 	return unix.Madvise(buf, flag)
 }
 
-// 封装msync，将映射到内存中的数据直接写入到磁盘中
+// 封装os.msync，将映射到内存中的数据直接写入到磁盘中
 // int msync(void *addr, size_t length, int flags);
 func msync(buf []byte) error {
-	// MS_SYNC请求写入，等到写入完成后再返回
+	// MS_SYNC挂起进程，知道I/O操作完成位置；也就是说当Msync结束之后，这个内存映射中的所有页都已经被刷新到的磁盘中;
 	return unix.Msync(buf, unix.MS_SYNC)
 }

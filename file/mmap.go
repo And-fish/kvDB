@@ -18,7 +18,7 @@ type MmapFile struct {
 	// 实际放置数据的[]byte
 	Data []byte
 	// File唯一标识
-	Fd *os.File // File是指向file的指针
+	Fd *os.File // File是文件描述符
 	/*
 		type file struct {
 		    pfd         poll.FD
@@ -31,7 +31,7 @@ type MmapFile struct {
 	*/
 }
 
-// 打开一个文件，返回MmapFile
+// 用mmap将文件映射到内存中，返回MmapFile
 func OpenMmapFileUsing(fd *os.File, sz int, writable bool) (*MmapFile, error) {
 	filename := fd.Name()
 	fi, err := fd.Stat()
@@ -65,7 +65,7 @@ func OpenMmapFileUsing(fd *os.File, sz int, writable bool) (*MmapFile, error) {
 	}, rerr
 }
 
-// 将一个文件按照Mmap的方式打开。会MmapFile的格式
+// 将一个文件按照Mmap的方式打开。(会调用OpenMmapFileUsing()) 返回MmapFile的格式
 func OpenMmapFile(filename string, flag int, maxSz int) (*MmapFile, error) {
 	// fmt.Printf("opening file %s with flag: %v\n", filename, flag)
 	// -rw-rw-rw-
@@ -85,15 +85,18 @@ func OpenMmapFile(filename string, flag int, maxSz int) (*MmapFile, error) {
 	return OpenMmapFileUsing(fd, maxSz, writable)
 }
 
+// Reader
 type mmapReader struct {
 	Data   []byte
 	offset int
 }
 
+// 实现Reader接口,Read
 func (mr *mmapReader) Read(buf []byte) (int, error) {
 	if mr.offset > len(mr.Data) {
 		return 0, io.EOF
 	}
+	// 将Data[offset:]复制到buf中
 	n := copy(buf, mr.Data[mr.offset:])
 	mr.offset += n
 	if n < len(buf) {
@@ -117,16 +120,18 @@ func (m *MmapFile) Bytes(off, sz int) ([]byte, error) {
 	return m.Data[off : off+sz], nil
 }
 
-// Truncature 兼容接口
+// Truncature 截断
+// 因为mmap分配的是page size的倍数，为了缓解空间浪费，需要截断
 func (m *MmapFile) Truncature(maxSz int64) error {
-	if err := m.Sync(); err != nil {
+	if err := m.Sync(); err != nil { // 先将内存中的数据写回到磁盘中
 		return fmt.Errorf("while sync file: %s, error: %v\n", m.Fd.Name(), err)
 	}
-	if err := m.Fd.Truncate(maxSz); err != nil {
+	if err := m.Fd.Truncate(maxSz); err != nil { // 文件描述符页需要修改
 		return fmt.Errorf("while truncate file: %s, error: %v\n", m.Fd.Name(), err)
 	}
 
 	var err error
+	// 再重新分配Data
 	m.Data, err = mmap.Mremap(m.Data, int(maxSz)) // Mmap up to max size.
 	return err
 }
@@ -186,6 +191,7 @@ func (m *MmapFile) AppendBuffer(offset uint32, buf []byte) error {
 			return err
 		}
 	}
+	// 将buf复制到mmap.data中
 	dLen := copy(m.Data[offset:end], buf)
 	if dLen != needSize {
 		return errors.Errorf("dLen != needSize AppendBuffer failed")
@@ -211,7 +217,7 @@ func (m *MmapFile) Delete() error {
 		return fmt.Errorf("while munmap file: %s, error: %v\n", m.Fd.Name(), err)
 	}
 	m.Data = nil
-	// 修改file的size为0
+	// 修改文件描述符的size为0
 	if err := m.Fd.Truncate(0); err != nil {
 		return fmt.Errorf("while truncate file: %s, error: %v\n", m.Fd.Name(), err)
 	}
@@ -246,9 +252,11 @@ func SyncDir(dir string) error {
 	if err != nil {
 		return errors.Wrapf(err, "while opening %s", dir)
 	}
+	// 同步dir
 	if err := df.Sync(); err != nil {
 		return errors.Wrapf(err, "while syncing %s", dir)
 	}
+	// 关闭dir
 	if err := df.Close(); err != nil {
 		return errors.Wrapf(err, "while closing %s", dir)
 	}
@@ -256,6 +264,7 @@ func SyncDir(dir string) error {
 }
 
 // ReName 兼容接口
+// TODO
 func (m *MmapFile) ReName(name string) error {
 	return nil
 }
